@@ -253,7 +253,7 @@ async function queryVizData(): Promise<VizData> {
        ) singles ON b.author_handle = singles.author_handle
        WHERE length(b.text) > 250
        ORDER BY length(b.text) DESC
-       LIMIT 8`
+       LIMIT 3`
     );
     const hiddenGems: GemBookmark[] = (gemRows[0]?.values ?? []).map((r) => ({
       author: r[0] as string,
@@ -626,13 +626,13 @@ function renderHiddenGems(data: VizData): string[] {
   if (data.hiddenGems.length === 0) return [];
 
   lines.push('');
-  lines.push(`  ${C.hot}${BOLD}HIDDEN GEMS${RESET}`);
+  lines.push(`  ${C.cyan}${BOLD}HIDDEN GEMS${RESET}`);
   lines.push(`  ${C.dim}one-time voices you saved — long, substantive, easy to forget${RESET}`);
   lines.push('');
 
   for (const b of data.hiddenGems) {
     const url = `x.com/${b.author}/status/${b.tweetId}`;
-    lines.push(`  ${C.hot}◆${RESET} ${C.text}@${b.author}${RESET}`);
+    lines.push(`  ${C.cyan}◆${RESET} ${C.text}@${b.author}${RESET}`);
     lines.push(`  ${C.dim}${truncateText(b.text, 62)}${RESET}`);
     lines.push(`  ${DIM}${url}${RESET}`);
     lines.push('');

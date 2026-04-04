@@ -6,7 +6,7 @@
  * No API keys needed. No local models. Just a logged-in Claude or Codex CLI.
  */
 
-import { execFileSync, execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { openDb, saveDb } from './db.js';
 import { twitterBookmarksIndexPath } from './paths.js';
 
@@ -25,17 +25,17 @@ interface LlmClassification {
   primary: string;
 }
 
-// ── Engine detection (same pattern as theories-v2.sh) ───────────────────
+// ── Engine detection ────────────────────────────────────────────────────
 
 type Engine = 'claude' | 'codex';
 
 function detectEngine(): Engine | null {
   try {
-    execSync('which claude', { stdio: 'ignore' });
+    execFileSync('which', ['claude'], { stdio: 'ignore' });
     return 'claude';
   } catch { /* not found */ }
   try {
-    execSync('which codex', { stdio: 'ignore' });
+    execFileSync('which', ['codex'], { stdio: 'ignore' });
     return 'codex';
   } catch { /* not found */ }
   return null;

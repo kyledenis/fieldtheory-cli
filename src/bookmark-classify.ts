@@ -1,6 +1,6 @@
 /**
- * Bookmark classification — tags each bookmark by type so the theories
- * system can match intelligently instead of random-sampling.
+ * Bookmark classification — tags each bookmark by type for filtering
+ * and search.
  *
  * Categories (non-exclusive, a bookmark can have multiple):
  *   tool       — GitHub repos, CLI tools, npm packages, open-source projects

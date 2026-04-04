@@ -63,7 +63,7 @@ async function exchangeCodeForToken(code: string, verifier: string): Promise<XOA
   const text = await response.text();
   const parsed = JSON.parse(text);
   if (!response.ok) {
-    throw new Error(`Token exchange failed (${response.status}): ${text}`);
+    throw new Error(`Token exchange failed (HTTP ${response.status}). Check your X API credentials.`);
   }
 
   return {

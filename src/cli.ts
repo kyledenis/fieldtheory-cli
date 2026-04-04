@@ -21,11 +21,12 @@ import {
 import { formatClassificationSummary } from './bookmark-classify.js';
 import { classifyWithLlm, classifyDomainsWithLlm } from './bookmark-classify-llm.js';
 import { renderViz } from './bookmarks-viz.js';
-import { dataDir, ensureDataDir, isFirstRun } from './paths.js';
+import { dataDir, ensureDataDir, isFirstRun, twitterBookmarksIndexPath } from './paths.js';
+import fs from 'node:fs';
 
-// ── Progress rendering ──────────────────────────────────────────────────────
+// ── Helpers ─────────────────────────────────────────────────────────────────
 
-const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+const SPINNER = ['\u280b', '\u2819', '\u2839', '\u2838', '\u283c', '\u2834', '\u2826', '\u2827', '\u2807', '\u280f'];
 let spinnerIdx = 0;
 
 function renderProgress(status: SyncProgress, startTime: number): void {
@@ -49,22 +50,124 @@ function friendlyStopReason(raw?: string): string {
   return FRIENDLY_STOP_REASONS[raw] ?? `Sync complete \u2014 ${raw}`;
 }
 
-// ── First-run welcome ───────────────────────────────────────────────────────
+const LOGO = `
+   \x1b[2m\u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\x1b[0m
+   \x1b[2m\u2502\x1b[0m  \x1b[1mF i e l d   T h e o r y\x1b[0m    \x1b[2m\u2502\x1b[0m
+   \x1b[2m\u2502\x1b[0m  \x1b[2mfieldtheory.dev/cli\x1b[0m        \x1b[2m\u2502\x1b[0m
+   \x1b[2m\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\x1b[0m`;
 
-function showWelcome(): void {
-  process.stderr.write(`
-  Field Theory CLI \u2014 self-custody for your bookmarks.
+export function showWelcome(): void {
+  console.log(LOGO);
+  console.log(`
+  Save a local copy of your X/Twitter bookmarks. Search them,
+  classify them, and make them available to any AI agent.
+  Your data never leaves your machine.
 
-  This tool syncs your X/Twitter bookmarks to a local
-  SQLite database on your machine. Your data never leaves
-  your computer.
+  Get started:
 
-  Requirements:
-    \u2022 Google Chrome with an active X login
+    1. Open Google Chrome and log into x.com
+    2. Run: ft sync
 
   Data will be stored at: ${dataDir()}
-
 `);
+}
+
+export async function showDashboard(): Promise<void> {
+  console.log(LOGO);
+  try {
+    const view = await getBookmarkStatusView();
+    const ago = view.lastUpdated ? timeAgo(view.lastUpdated) : 'never';
+    console.log(`
+  \x1b[1m${view.bookmarkCount.toLocaleString()}\x1b[0m bookmarks  \x1b[2m\u2502\x1b[0m  last synced \x1b[1m${ago}\x1b[0m  \x1b[2m\u2502\x1b[0m  ${dataDir()}
+`);
+
+    if (fs.existsSync(twitterBookmarksIndexPath())) {
+      const counts = await getCategoryCounts();
+      const cats = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 7);
+      if (cats.length > 0) {
+        const catLine = cats.map(([c, n]) => `${c} (${n})`).join(' \u00b7 ');
+        console.log(`  \x1b[2m${catLine}\x1b[0m`);
+      }
+    }
+
+    console.log(`
+  \x1b[2mSync now:\x1b[0m     ft sync
+  \x1b[2mSearch:\x1b[0m       ft search "query"
+  \x1b[2mExplore:\x1b[0m      ft viz
+  \x1b[2mAll commands:\x1b[0m  ft --help
+`);
+  } catch {
+    console.log(`
+  Data: ${dataDir()}
+
+  Run: ft sync
+`);
+  }
+}
+
+function timeAgo(dateStr: string): string {
+  const ms = Date.now() - new Date(dateStr).getTime();
+  const mins = Math.floor(ms / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  return `${Math.floor(days / 30)}mo ago`;
+}
+
+function showSyncWelcome(): void {
+  console.log(`
+  Make sure Google Chrome is open and logged into x.com.
+  Your Chrome session is used to authenticate \u2014 no passwords
+  are stored or transmitted.
+`);
+}
+
+/** Check that bookmarks have been synced. Returns true if data exists. */
+function requireData(): boolean {
+  if (isFirstRun()) {
+    console.log(`
+  No bookmarks synced yet.
+
+  Get started:
+
+    1. Open Google Chrome and log into x.com
+    2. Run: ft sync
+`);
+    process.exitCode = 1;
+    return false;
+  }
+  return true;
+}
+
+/** Check that the search index exists. Returns true if it does. */
+function requireIndex(): boolean {
+  if (!requireData()) return false;
+  if (!fs.existsSync(twitterBookmarksIndexPath())) {
+    console.log(`
+  Search index not built yet.
+
+  Run: ft index
+`);
+    process.exitCode = 1;
+    return false;
+  }
+  return true;
+}
+
+/** Wrap an async action with graceful error handling. */
+function safe(fn: (...args: any[]) => Promise<void>): (...args: any[]) => Promise<void> {
+  return async (...args: any[]) => {
+    try {
+      await fn(...args);
+    } catch (err) {
+      const msg = (err as Error).message;
+      console.error(`\n  Error: ${msg}\n`);
+      process.exitCode = 1;
+    }
+  };
 }
 
 // ── CLI ─────────────────────────────────────────────────────────────────────
@@ -83,7 +186,10 @@ export function buildCli() {
     .name('ft')
     .description('Self-custody for your X/Twitter bookmarks. Sync, search, classify, and explore locally.')
     .version('1.0.1')
-    .showHelpAfterError();
+    .showHelpAfterError()
+    .hook('preAction', () => {
+      console.log(LOGO);
+    });
 
   // ── sync ────────────────────────────────────────────────────────────────
 
@@ -100,46 +206,71 @@ export function buildCli() {
     .option('--chrome-profile-directory <name>', 'Chrome profile name')
     .action(async (options) => {
       const firstRun = isFirstRun();
-      if (firstRun) showWelcome();
+      if (firstRun) showSyncWelcome();
       ensureDataDir();
 
-      const useApi = Boolean(options.api);
-      const mode = Boolean(options.full) ? 'full' : 'incremental';
+      try {
+        const useApi = Boolean(options.api);
+        const mode = Boolean(options.full) ? 'full' : 'incremental';
 
-      if (useApi) {
-        const result = await syncTwitterBookmarks(mode, {
-          targetAdds: typeof options.targetAdds === 'number' && !Number.isNaN(options.targetAdds) ? options.targetAdds : undefined,
-        });
-        console.log(`\n  \u2713 ${result.added} new bookmarks synced (${result.totalBookmarks} total)`);
-        console.log(`  \u2713 Data: ${dataDir()}\n`);
-        await rebuildAndClassify(result.added);
-      } else {
-        const startTime = Date.now();
-        const result = await syncBookmarksGraphQL({
-          incremental: !Boolean(options.full),
-          maxPages: Number(options.maxPages) || 500,
-          targetAdds: typeof options.targetAdds === 'number' && !Number.isNaN(options.targetAdds) ? options.targetAdds : undefined,
-          delayMs: Number(options.delayMs) || 600,
-          maxMinutes: Number(options.maxMinutes) || 30,
-          chromeUserDataDir: options.chromeUserDataDir ? String(options.chromeUserDataDir) : undefined,
-          chromeProfileDirectory: options.chromeProfileDirectory ? String(options.chromeProfileDirectory) : undefined,
-          onProgress: (status: SyncProgress) => {
-            renderProgress(status, startTime);
-            if (status.done) process.stderr.write('\n');
-          },
-        });
+        if (useApi) {
+          const result = await syncTwitterBookmarks(mode, {
+            targetAdds: typeof options.targetAdds === 'number' && !Number.isNaN(options.targetAdds) ? options.targetAdds : undefined,
+          });
+          console.log(`\n  \u2713 ${result.added} new bookmarks synced (${result.totalBookmarks} total)`);
+          console.log(`  \u2713 Data: ${dataDir()}\n`);
+          await rebuildAndClassify(result.added);
+        } else {
+          const startTime = Date.now();
+          const result = await syncBookmarksGraphQL({
+            incremental: !Boolean(options.full),
+            maxPages: Number(options.maxPages) || 500,
+            targetAdds: typeof options.targetAdds === 'number' && !Number.isNaN(options.targetAdds) ? options.targetAdds : undefined,
+            delayMs: Number(options.delayMs) || 600,
+            maxMinutes: Number(options.maxMinutes) || 30,
+            chromeUserDataDir: options.chromeUserDataDir ? String(options.chromeUserDataDir) : undefined,
+            chromeProfileDirectory: options.chromeProfileDirectory ? String(options.chromeProfileDirectory) : undefined,
+            onProgress: (status: SyncProgress) => {
+              renderProgress(status, startTime);
+              if (status.done) process.stderr.write('\n');
+            },
+          });
 
-        console.log(`\n  \u2713 ${result.added} new bookmarks synced (${result.totalBookmarks} total)`);
-        console.log(`  ${friendlyStopReason(result.stopReason)}`);
-        console.log(`  \u2713 Data: ${dataDir()}\n`);
+          console.log(`\n  \u2713 ${result.added} new bookmarks synced (${result.totalBookmarks} total)`);
+          console.log(`  ${friendlyStopReason(result.stopReason)}`);
+          console.log(`  \u2713 Data: ${dataDir()}\n`);
 
-        await rebuildAndClassify(result.added);
-      }
+          await rebuildAndClassify(result.added);
+        }
 
-      if (firstRun) {
-        console.log(`\n  Try:  ft search "machine learning"`);
-        console.log(`        ft viz`);
-        console.log(`        ft categories\n`);
+        if (firstRun) {
+          console.log(`\n  Try:  ft search "machine learning"`);
+          console.log(`        ft viz`);
+          console.log(`        ft categories`);
+          console.log(`\n  Classify with AI? If you have Claude or Codex installed:`);
+          console.log(`        ft classify`);
+          console.log(`\n  You can also just tell Claude to use the ft CLI to search and`);
+          console.log(`  explore your bookmarks. It already knows how.\n`);
+        }
+      } catch (err) {
+        const msg = (err as Error).message;
+        if (firstRun && (msg.includes('cookie') || msg.includes('Cookie') || msg.includes('Keychain'))) {
+          console.log(`
+  Couldn't connect to your Chrome session.
+
+  To sync your bookmarks:
+
+    1. Open Google Chrome
+    2. Go to x.com and make sure you're logged in
+    3. Run: ft sync
+
+  If you use multiple Chrome profiles, specify which one:
+    ft sync --chrome-profile-directory "Profile 1"
+`);
+        } else {
+          console.error(`\n  Error: ${msg}\n`);
+        }
+        process.exitCode = 1;
       }
     });
 
@@ -153,7 +284,8 @@ export function buildCli() {
     .option('--after <date>', 'Bookmarks posted after this date (YYYY-MM-DD)')
     .option('--before <date>', 'Bookmarks posted before this date (YYYY-MM-DD)')
     .option('--limit <n>', 'Max results', (v: string) => Number(v), 20)
-    .action(async (query: string, options) => {
+    .action(safe(async (query: string, options) => {
+      if (!requireIndex()) return;
       const results = await searchBookmarks({
         query,
         author: options.author ? String(options.author) : undefined,
@@ -162,7 +294,7 @@ export function buildCli() {
         limit: Number(options.limit) || 20,
       });
       console.log(formatSearchResults(results));
-    });
+    }));
 
   // ── list ────────────────────────────────────────────────────────────────
 
@@ -178,7 +310,8 @@ export function buildCli() {
     .option('--limit <n>', 'Max results', (v: string) => Number(v), 30)
     .option('--offset <n>', 'Offset into results', (v: string) => Number(v), 0)
     .option('--json', 'JSON output')
-    .action(async (options) => {
+    .action(safe(async (options) => {
+      if (!requireIndex()) return;
       const items = await listBookmarks({
         query: options.query ? String(options.query) : undefined,
         author: options.author ? String(options.author) : undefined,
@@ -201,7 +334,7 @@ export function buildCli() {
         console.log(`  ${item.url}`);
         console.log();
       }
-    });
+    }));
 
   // ── show ─────────────────────────────────────────────────────────────────
 
@@ -210,10 +343,11 @@ export function buildCli() {
     .description('Show one bookmark in detail')
     .argument('<id>', 'Bookmark id')
     .option('--json', 'JSON output')
-    .action(async (id: string, options) => {
+    .action(safe(async (id: string, options) => {
+      if (!requireIndex()) return;
       const item = await getBookmarkById(String(id));
       if (!item) {
-        console.error(`Unknown bookmark: ${String(id)}`);
+        console.log(`  Bookmark not found: ${String(id)}`);
         process.exitCode = 1;
         return;
       }
@@ -227,14 +361,15 @@ export function buildCli() {
       if (item.links.length) console.log(`links: ${item.links.join(', ')}`);
       if (item.categories) console.log(`categories: ${item.categories}`);
       if (item.domains) console.log(`domains: ${item.domains}`);
-    });
+    }));
 
   // ── stats ───────────────────────────────────────────────────────────────
 
   program
     .command('stats')
     .description('Aggregate statistics from your bookmarks')
-    .action(async () => {
+    .action(safe(async () => {
+      if (!requireIndex()) return;
       const stats = await getStats();
       console.log(`Bookmarks: ${stats.totalBookmarks}`);
       console.log(`Unique authors: ${stats.uniqueAuthors}`);
@@ -243,25 +378,32 @@ export function buildCli() {
       for (const a of stats.topAuthors) console.log(`  @${a.handle}: ${a.count}`);
       console.log(`\nLanguages:`);
       for (const l of stats.languageBreakdown) console.log(`  ${l.language}: ${l.count}`);
-    });
+    }));
 
   // ── viz ─────────────────────────────────────────────────────────────────
 
   program
     .command('viz')
     .description('Visual dashboard of your bookmarking patterns')
-    .action(async () => {
+    .action(safe(async () => {
+      if (!requireIndex()) return;
       console.log(await renderViz());
-    });
+    }));
 
   // ── classify ────────────────────────────────────────────────────────────
 
   program
     .command('classify')
-    .description('Classify bookmarks by category')
-    .option('--deep', 'Use LLM classification (requires claude or codex CLI)')
-    .action(async (options) => {
-      if (options.deep) {
+    .description('Classify bookmarks by category using LLM (requires claude or codex CLI)')
+    .option('--regex', 'Use fast regex classification instead of LLM (instant, free)')
+    .action(safe(async (options) => {
+      if (!requireData()) return;
+      if (options.regex) {
+        process.stderr.write('Classifying bookmarks (regex)...\n');
+        const result = await classifyAndRebuild();
+        console.log(`Indexed ${result.recordCount} bookmarks \u2192 ${result.dbPath}`);
+        console.log(formatClassificationSummary(result.summary));
+      } else {
         process.stderr.write('Classifying bookmarks with LLM...\n');
         const result = await classifyWithLlm({
           onBatch: (done: number, total: number) => {
@@ -270,13 +412,8 @@ export function buildCli() {
         });
         console.log(`Engine: ${result.engine}`);
         console.log(`Classified ${result.classified}/${result.totalUnclassified} (${result.batches} batches, ${result.failed} failed)`);
-      } else {
-        process.stderr.write('Classifying bookmarks (regex)...\n');
-        const result = await classifyAndRebuild();
-        console.log(`Indexed ${result.recordCount} bookmarks \u2192 ${result.dbPath}`);
-        console.log(formatClassificationSummary(result.summary));
       }
-    });
+    }));
 
   // ── classify-domains ────────────────────────────────────────────────────
 
@@ -284,7 +421,8 @@ export function buildCli() {
     .command('classify-domains')
     .description('Classify bookmarks by subject domain using LLM (ai, finance, etc.)')
     .option('--all', 'Re-classify all bookmarks, not just missing')
-    .action(async (options) => {
+    .action(safe(async (options) => {
+      if (!requireData()) return;
       process.stderr.write('Classifying bookmark domains with LLM...\n');
       const result = await classifyDomainsWithLlm({
         all: options.all ?? false,
@@ -294,17 +432,18 @@ export function buildCli() {
       });
       console.log(`Engine: ${result.engine}`);
       console.log(`Classified ${result.classified}/${result.totalUnclassified} (${result.batches} batches, ${result.failed} failed)`);
-    });
+    }));
 
   // ── categories ──────────────────────────────────────────────────────────
 
   program
     .command('categories')
     .description('Show category distribution')
-    .action(async () => {
+    .action(safe(async () => {
+      if (!requireIndex()) return;
       const counts = await getCategoryCounts();
       if (Object.keys(counts).length === 0) {
-        console.log('No categories found. Run: ft classify');
+        console.log('  No categories found. Run: ft classify');
         return;
       }
       const total = Object.values(counts).reduce((a, b) => a + b, 0);
@@ -312,17 +451,18 @@ export function buildCli() {
         const pct = ((count / total) * 100).toFixed(1);
         console.log(`  ${cat.padEnd(14)} ${String(count).padStart(5)}  (${pct}%)`);
       }
-    });
+    }));
 
   // ── domains ─────────────────────────────────────────────────────────────
 
   program
     .command('domains')
     .description('Show domain distribution')
-    .action(async () => {
+    .action(safe(async () => {
+      if (!requireIndex()) return;
       const counts = await getDomainCounts();
       if (Object.keys(counts).length === 0) {
-        console.log('No domains found. Run: ft classify-domains');
+        console.log('  No domains found. Run: ft classify-domains');
         return;
       }
       const total = Object.values(counts).reduce((a, b) => a + b, 0);
@@ -330,39 +470,41 @@ export function buildCli() {
         const pct = ((count / total) * 100).toFixed(1);
         console.log(`  ${dom.padEnd(20)} ${String(count).padStart(5)}  (${pct}%)`);
       }
-    });
+    }));
 
   // ── index ───────────────────────────────────────────────────────────────
 
   program
     .command('index')
     .description('Rebuild the SQLite search index from the JSONL cache')
-    .action(async () => {
+    .action(safe(async () => {
+      if (!requireData()) return;
       process.stderr.write('Building search index...\n');
       const result = await buildIndex();
       console.log(`Indexed ${result.recordCount} bookmarks \u2192 ${result.dbPath}`);
-    });
+    }));
 
   // ── auth ────────────────────────────────────────────────────────────────
 
   program
     .command('auth')
-    .description('Set up OAuth for API-based sync (needed for ft sync --api)')
-    .action(async () => {
+    .description('Set up OAuth for API-based sync (optional, needed for ft sync --api)')
+    .action(safe(async () => {
       const result = await runTwitterOAuthFlow();
       console.log(`Saved token to ${result.tokenPath}`);
       if (result.scope) console.log(`Scope: ${result.scope}`);
-    });
+    }));
 
   // ── status ──────────────────────────────────────────────────────────────
 
   program
     .command('status')
     .description('Show sync status and data location')
-    .action(async () => {
+    .action(safe(async () => {
+      if (!requireData()) return;
       const view = await getBookmarkStatusView();
       console.log(formatBookmarkStatus(view));
-    });
+    }));
 
   // ── path ────────────────────────────────────────────────────────────────
 
@@ -378,10 +520,11 @@ export function buildCli() {
     .description('Sample bookmarks by category')
     .argument('<category>', 'Category: tool, security, technique, launch, research, opinion, commerce')
     .option('--limit <n>', 'Max results', (v: string) => Number(v), 10)
-    .action(async (category: string, options) => {
+    .action(safe(async (category: string, options) => {
+      if (!requireIndex()) return;
       const results = await sampleByCategory(category, Number(options.limit) || 10);
       if (results.length === 0) {
-        console.log(`No bookmarks found with category "${category}". Run: ft classify`);
+        console.log(`  No bookmarks found with category "${category}". Run: ft classify`);
         return;
       }
       for (const r of results) {
@@ -391,22 +534,23 @@ export function buildCli() {
         if (r.githubUrls) console.log(`  github: ${r.githubUrls}`);
         console.log();
       }
-    });
+    }));
 
   // ── fetch-media ─────────────────────────────────────────────────────────
 
   program
     .command('fetch-media')
-    .description('Download media assets for bookmarks')
+    .description('Download media assets for bookmarks (static images only)')
     .option('--limit <n>', 'Max bookmarks to process', (v: string) => Number(v), 100)
     .option('--max-bytes <n>', 'Per-asset byte limit', (v: string) => Number(v), 50 * 1024 * 1024)
-    .action(async (options) => {
+    .action(safe(async (options) => {
+      if (!requireData()) return;
       const result = await fetchBookmarkMediaBatch({
         limit: Number(options.limit) || 100,
         maxBytes: Number(options.maxBytes) || 50 * 1024 * 1024,
       });
       console.log(JSON.stringify(result, null, 2));
-    });
+    }));
 
   // ── hidden backward-compat aliases ────────────────────────────────────
 

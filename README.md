@@ -27,7 +27,7 @@ ft categories
 ft stats
 ```
 
-On first run, `ft sync` extracts your X session from Chrome and downloads your bookmarks into `~/.fieldtheory/`. It auto-classifies them into 7 categories (tool, security, technique, launch, research, opinion, commerce) using fast regex matching.
+On first run, `ft sync` extracts your X session from Chrome and downloads your bookmarks into `~/.ft-bookmarks/`. It auto-classifies them into 7 categories (tool, security, technique, launch, research, opinion, commerce) using fast regex matching.
 
 ## Commands
 

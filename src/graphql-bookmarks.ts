@@ -121,7 +121,12 @@ async function loadExistingBookmarks(): Promise<BookmarkRecord[]> {
   const cachePath = twitterBookmarksCachePath();
   const existing = await readJsonLines<BookmarkRecord>(cachePath);
   if (existing.length > 0) return existing;
-  return exportBookmarksForSyncSeed();
+  // On first run, no JSONL and no DB — return empty
+  try {
+    return await exportBookmarksForSyncSeed();
+  } catch {
+    return [];
+  }
 }
 
 function buildUrl(cursor?: string): string {
@@ -141,6 +146,7 @@ function buildHeaders(csrfToken: string, cookieHeader?: string): Record<string, 
     'x-twitter-auth-type': 'OAuth2Session',
     'x-twitter-active-user': 'yes',
     'content-type': 'application/json',
+    'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36',
     cookie: cookieHeader ?? `ct0=${csrfToken}`,
   };
 }

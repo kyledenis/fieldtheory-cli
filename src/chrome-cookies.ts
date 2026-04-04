@@ -1,4 +1,4 @@
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { existsSync, unlinkSync, copyFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir, platform } from 'node:os';
@@ -22,8 +22,9 @@ function getMacOSChromeKey(): Buffer {
 
   for (const candidate of candidates) {
     try {
-      const password = execSync(
-        `security find-generic-password -w -s "${candidate.service}" -a "${candidate.account}"`,
+      const password = execFileSync(
+        'security',
+        ['find-generic-password', '-w', '-s', candidate.service, '-a', candidate.account],
         { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }
       ).trim();
       if (password) {
@@ -45,19 +46,32 @@ function getMacOSChromeKey(): Buffer {
 function sanitizeCookieValue(name: string, value: string): string {
   const cleaned = value.replace(/\0+$/g, '').trim();
   if (!cleaned) {
-    throw new Error(`Cookie ${name} was empty after decryption.`);
+    throw new Error(
+      `Cookie ${name} was empty after decryption.\n\n` +
+      'This usually happens when Chrome is open. Try:\n' +
+      '  1. Close Chrome completely and run ft sync again\n' +
+      '  2. If that doesn\'t work, try a different profile:\n' +
+      '     ft sync --chrome-profile-directory "Profile 1"\n' +
+      '  3. Or use the API method instead:\n' +
+      '     ft auth && ft sync --api'
+    );
   }
   if (!/^[\x21-\x7E]+$/.test(cleaned)) {
     throw new Error(
-      `Could not decrypt the ${name} cookie into a valid ASCII header value.\n` +
-      'This usually means the wrong browser profile was selected or the cookie format changed.\n' +
-      'Try a different Chrome profile, or use: ft sync --api'
+      `Could not decrypt the ${name} cookie.\n\n` +
+      'This usually happens when Chrome is open or the wrong profile is selected.\n\n' +
+      'Try:\n' +
+      '  1. Close Chrome completely and run ft sync again\n' +
+      '  2. Try a different profile:\n' +
+      '     ft sync --chrome-profile-directory "Profile 1"\n' +
+      '  3. Or use the API method instead:\n' +
+      '     ft auth && ft sync --api'
     );
   }
   return cleaned;
 }
 
-export function decryptCookieValue(encryptedValue: Buffer, key: Buffer): string {
+export function decryptCookieValue(encryptedValue: Buffer, key: Buffer, dbVersion = 0): string {
   if (encryptedValue.length === 0) return '';
 
   if (encryptedValue[0] === 0x76 && encryptedValue[1] === 0x31 && encryptedValue[2] === 0x30) {
@@ -66,6 +80,12 @@ export function decryptCookieValue(encryptedValue: Buffer, key: Buffer): string 
     const decipher = createDecipheriv('aes-128-cbc', key, iv);
     let decrypted = decipher.update(ciphertext);
     decrypted = Buffer.concat([decrypted, decipher.final()]);
+
+    // Chrome DB version >= 24 (Chrome ~130+) prepends SHA256(host_key) to plaintext
+    if (dbVersion >= 24 && decrypted.length > 32) {
+      decrypted = decrypted.subarray(32);
+    }
+
     return decrypted.toString('utf8');
   }
 
@@ -74,11 +94,34 @@ export function decryptCookieValue(encryptedValue: Buffer, key: Buffer): string 
 
 interface RawCookie {
   name: string;
+  host_key: string;
   encrypted_value_hex: string;
   value: string;
 }
 
-function queryCookies(dbPath: string, domain: string, names: string[]): RawCookie[] {
+function queryDbVersion(dbPath: string): number {
+  const tryQuery = (p: string) =>
+    execFileSync('sqlite3', [p, "SELECT value FROM meta WHERE key='version';"], {
+      encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 5000,
+    }).trim();
+
+  try {
+    return parseInt(tryQuery(dbPath), 10) || 0;
+  } catch {
+    // DB may be locked by Chrome — try a copy
+    const tmpDb = join(tmpdir(), `ft-meta-${randomUUID()}.db`);
+    try {
+      copyFileSync(dbPath, tmpDb);
+      return parseInt(tryQuery(tmpDb), 10) || 0;
+    } catch {
+      return 0;
+    } finally {
+      try { unlinkSync(tmpDb); } catch {}
+    }
+  }
+}
+
+function queryCookies(dbPath: string, domain: string, names: string[]): { cookies: RawCookie[]; dbVersion: number } {
   if (!existsSync(dbPath)) {
     throw new Error(
       `Chrome Cookies database not found at: ${dbPath}\n` +
@@ -89,10 +132,10 @@ function queryCookies(dbPath: string, domain: string, names: string[]): RawCooki
 
   const safeDomain = domain.replace(/'/g, "''");
   const nameList = names.map(n => `'${n.replace(/'/g, "''")}'`).join(',');
-  const sql = `SELECT name, hex(encrypted_value) as encrypted_value_hex, value FROM cookies WHERE host_key LIKE '%${safeDomain}' AND name IN (${nameList});`;
+  const sql = `SELECT name, host_key, hex(encrypted_value) as encrypted_value_hex, value FROM cookies WHERE host_key LIKE '%${safeDomain}' AND name IN (${nameList});`;
 
   const tryQuery = (path: string): string =>
-    execSync(`sqlite3 -json "${path}" "${sql}"`, {
+    execFileSync('sqlite3', ['-json', path, sql], {
       encoding: 'utf8',
       stdio: ['pipe', 'pipe', 'pipe'],
       timeout: 10000,
@@ -118,11 +161,13 @@ function queryCookies(dbPath: string, domain: string, names: string[]): RawCooki
     }
   }
 
-  if (!output || output === '[]') return [];
+  const dbVersion = queryDbVersion(dbPath);
+
+  if (!output || output === '[]') return { cookies: [], dbVersion };
   try {
-    return JSON.parse(output);
+    return { cookies: JSON.parse(output), dbVersion };
   } catch {
-    return [];
+    return { cookies: [], dbVersion };
   }
 }
 
@@ -142,17 +187,17 @@ export function extractChromeXCookies(
   const dbPath = join(chromeUserDataDir, profileDirectory, 'Cookies');
   const key = getMacOSChromeKey();
 
-  let cookies = queryCookies(dbPath, '.x.com', ['ct0', 'auth_token']);
-  if (cookies.length === 0) {
-    cookies = queryCookies(dbPath, '.twitter.com', ['ct0', 'auth_token']);
+  let result = queryCookies(dbPath, '.x.com', ['ct0', 'auth_token']);
+  if (result.cookies.length === 0) {
+    result = queryCookies(dbPath, '.twitter.com', ['ct0', 'auth_token']);
   }
 
   const decrypted = new Map<string, string>();
-  for (const cookie of cookies) {
+  for (const cookie of result.cookies) {
     const hexVal = cookie.encrypted_value_hex;
     if (hexVal && hexVal.length > 0) {
       const buf = Buffer.from(hexVal, 'hex');
-      decrypted.set(cookie.name, decryptCookieValue(buf, key));
+      decrypted.set(cookie.name, decryptCookieValue(buf, key, result.dbVersion));
     } else if (cookie.value) {
       decrypted.set(cookie.name, cookie.value);
     }

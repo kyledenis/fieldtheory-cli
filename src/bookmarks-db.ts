@@ -216,12 +216,18 @@ function initSchema(db: Database): void {
 }
 
 function ensureMigrations(db: Database): void {
+  // Ensure meta table exists (may not on a fresh/empty DB)
+  db.run('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)');
   const rows = db.exec("SELECT value FROM meta WHERE key = 'schema_version'");
   const version = rows.length ? Number(rows[0].values[0]?.[0] ?? 0) : 0;
   if (version < 3) {
-    try { db.run('ALTER TABLE bookmarks ADD COLUMN domains TEXT'); } catch { /* already exists */ }
-    try { db.run('ALTER TABLE bookmarks ADD COLUMN primary_domain TEXT'); } catch { /* already exists */ }
-    db.run('CREATE INDEX IF NOT EXISTS idx_bookmarks_domain ON bookmarks(primary_domain)');
+    // bookmarks table may not exist yet (first run before index build)
+    const tableExists = db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='bookmarks'");
+    if (tableExists.length && tableExists[0].values.length > 0) {
+      try { db.run('ALTER TABLE bookmarks ADD COLUMN domains TEXT'); } catch { /* already exists */ }
+      try { db.run('ALTER TABLE bookmarks ADD COLUMN primary_domain TEXT'); } catch { /* already exists */ }
+      db.run('CREATE INDEX IF NOT EXISTS idx_bookmarks_domain ON bookmarks(primary_domain)');
+    }
     db.run("REPLACE INTO meta VALUES ('schema_version', '3')");
   }
 }
