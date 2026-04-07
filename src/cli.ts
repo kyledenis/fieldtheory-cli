@@ -161,6 +161,14 @@ const WHATS_NEW: Record<string, string[]> = {
     'ft sync --rebuild replaces --full',
     'Update notifications when a new version is available',
   ],
+  '1.3.0': [
+    'Cross-platform: Linux and Windows support for cookie extraction',
+    'Browser support: Chrome, Brave, Firefox, Helium, Comet, Chromium',
+    'ft sync --browser <name> \u2014 choose your browser',
+    'ft sync --cookies <ct0> <auth_token> \u2014 paste cookies directly (any OS)',
+    'ft model \u2014 choose and remember your preferred LLM engine',
+    '`fieldtheory` command alias (fixes PowerShell conflict with `ft`)',
+  ],
 };
 
 function showWhatsNew(): void {
@@ -375,8 +383,31 @@ export function buildCli() {
   program
     .name('ft')
     .description('Self-custody for your X/Twitter bookmarks. Sync, search, classify, and explore locally.')
-    .version('1.2.2')
+    .version('1.3.0')
     .showHelpAfterError()
+    .addHelpText('after', `
+Quick start:
+  ft sync                        Sync bookmarks from your browser
+  ft search "query"              Full-text search
+  ft viz                         Visual dashboard
+
+Explore:
+  ft list --category tool        Filter by category
+  ft list --domain ai            Filter by domain
+  ft show <id>                   Full bookmark detail
+  ft stats                       Aggregate statistics
+
+Classify:
+  ft classify                    Categorize with LLM (claude or codex)
+  ft classify --regex            Quick regex-based classification
+  ft model                       Choose your LLM engine
+
+Manage:
+  ft sync --browser brave        Use a specific browser
+  ft sync --cookies <ct0> <auth> Paste cookies directly (any OS)
+  ft index --force               Rebuild search index
+  ft status                      Sync status and data location
+`)
     .hook('preAction', () => {
       console.log(logo());
       showWhatsNew();
@@ -387,20 +418,33 @@ export function buildCli() {
   program
     .command('sync')
     .description('Sync bookmarks from X into your local database')
-    .option('--api', 'Use OAuth v2 API instead of Chrome session', false)
+    // ── Mode ──
+    .option('--api', 'Use OAuth v2 API instead of browser session', false)
     .option('--rebuild', 'Full re-crawl of all bookmarks', false)
     .option('--gaps', 'Backfill missing data (quoted tweets, truncated articles)', false)
-    .option('--yes', 'Skip confirmation prompts', false)
     .option('--classify', 'Classify new bookmarks with LLM after syncing', false)
+    .option('--yes', 'Skip confirmation prompts', false)
+    // ── Browser ──
+    .option('--browser <name>', 'Browser to read cookies from (chrome, brave, firefox, helium, comet)')
+    .option('--cookies <values...>', 'Pass ct0 and auth_token directly — skips browser extraction')
+    .option('--chrome-user-data-dir <path>', 'Override Chrome-family user-data directory')
+    .option('--chrome-profile-directory <name>', 'Override Chrome-family profile (e.g. "Profile 1")')
+    .option('--firefox-profile-dir <path>', 'Override Firefox profile directory')
+    // ── Tuning ──
     .option('--max-pages <n>', 'Max pages to fetch', (v: string) => Number(v), 500)
     .option('--target-adds <n>', 'Stop after N new bookmarks', (v: string) => Number(v))
     .option('--delay-ms <n>', 'Delay between requests in ms', (v: string) => Number(v), 600)
     .option('--max-minutes <n>', 'Max runtime in minutes', (v: string) => Number(v), 30)
-    .option('--browser <name>', 'Browser to read session from (chrome, brave, firefox, ...)')
-    .option('--cookies <values...>', 'Pass ct0 and auth_token directly (skips browser extraction)')
-    .option('--chrome-user-data-dir <path>', 'Chrome-family user-data directory')
-    .option('--chrome-profile-directory <name>', 'Chrome-family profile name')
-    .option('--firefox-profile-dir <path>', 'Firefox profile directory')
+    .addHelpText('after', `
+Examples:
+  ft sync                              Incremental sync (auto-detects browser)
+  ft sync --browser brave              Sync using Brave
+  ft sync --browser firefox            Sync using Firefox
+  ft sync --cookies <ct0> <auth_token> Paste cookies from DevTools (any OS)
+  ft sync --gaps                       Backfill quoted tweets and truncated text
+  ft sync --rebuild                    Full re-crawl from scratch
+  ft sync --classify                   Classify new bookmarks after syncing
+`)
     .action(async (options) => {
       const firstRun = isFirstRun();
       if (firstRun) showSyncWelcome();
