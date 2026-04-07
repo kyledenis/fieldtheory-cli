@@ -164,7 +164,7 @@ function logo(): string {
   const innerW = 33;
   const line1 = 'F i e l d   T h e o r y';
   const line2 = 'fieldtheory.dev/cli';
-  const pad1 = innerW - line1.length - 2;
+  const pad1 = innerW - line1.length - 3;
   const pad2 = innerW - line2.length - vLabel.length - 4;
   return `
      \x1b[2m\u250c${'\u2500'.repeat(innerW)}\u2510\x1b[0m
