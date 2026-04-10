@@ -29,9 +29,9 @@ import {
   type MdBookmark,
 } from './md-prompts.js';
 
-const MIN_CATEGORY_COUNT = 5;
-const MIN_DOMAIN_COUNT   = 5;
-const MIN_ENTITY_COUNT   = 10;
+const MIN_CATEGORY_COUNT = 2;
+const MIN_DOMAIN_COUNT   = 2;
+const MIN_ENTITY_COUNT   = 3;
 const MAX_SAMPLE_SIZE    = 50;
 
 /** Scale timeout by sample count — large categories need more time. */

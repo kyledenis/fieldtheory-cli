@@ -769,40 +769,44 @@ export function buildCli() {
     .option('--regex', 'Use simple regex classification instead of LLM')
     .action(safe(async (options) => {
       if (!requireData()) return;
-      if (options.regex) {
-        process.stderr.write('Classifying bookmarks (regex)...\n');
-        const result = await classifyAndRebuild();
-        console.log(`Indexed ${result.recordCount} bookmarks \u2192 ${result.dbPath}`);
-        console.log(formatClassificationSummary(result.summary));
-      } else {
-        const engine = await resolveEngine();
 
-        let catStart = Date.now();
-        process.stderr.write('Classifying categories with LLM (batches of 50, ~2 min per batch)...\n');
-        const catResult = await classifyWithLlm({
-          engine,
-          onBatch: (done: number, total: number) => {
-            const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-            const elapsed = Math.round((Date.now() - catStart) / 1000);
-            process.stderr.write(`  Categories: ${done}/${total} (${pct}%) \u2502 ${elapsed}s elapsed\n`);
-          },
-        });
-        console.log(`\nEngine: ${catResult.engine}`);
-        console.log(`Categories: ${catResult.classified}/${catResult.totalUnclassified} classified`);
+      // Always run regex classification first as a baseline
+      process.stderr.write('Classifying bookmarks (regex baseline)...\n');
+      const regexResult = await classifyAndRebuild();
+      console.log(`Regex: ${formatClassificationSummary(regexResult.summary)}`);
 
-        let domStart = Date.now();
-        process.stderr.write('\nClassifying domains with LLM (batches of 50, ~2 min per batch)...\n');
-        const domResult = await classifyDomainsWithLlm({
-          engine,
-          all: false,
-          onBatch: (done: number, total: number) => {
-            const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-            const elapsed = Math.round((Date.now() - domStart) / 1000);
-            process.stderr.write(`  Domains: ${done}/${total} (${pct}%) \u2502 ${elapsed}s elapsed\n`);
-          },
-        });
-        console.log(`\nDomains: ${domResult.classified}/${domResult.totalUnclassified} classified`);
+      if (options.regex) return;
+
+      const engine = await resolveEngine();
+
+      let catStart = Date.now();
+      process.stderr.write('\nClassifying categories with LLM (batches of 50, ~2 min per batch)...\n');
+      const catResult = await classifyWithLlm({
+        engine,
+        onBatch: (done: number, total: number) => {
+          const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+          const elapsed = Math.round((Date.now() - catStart) / 1000);
+          process.stderr.write(`  Categories: ${done}/${total} (${pct}%) | ${elapsed}s elapsed\n`);
+        },
+      });
+      console.log(`\nEngine: ${catResult.engine}`);
+      console.log(`Categories: ${catResult.classified}/${catResult.totalUnclassified} classified`);
+      if (catResult.failed > 0) {
+        console.log(`  (${catResult.failed} failed — the regex baseline still covers these)`);
       }
+
+      let domStart = Date.now();
+      process.stderr.write('\nClassifying domains with LLM (batches of 50, ~2 min per batch)...\n');
+      const domResult = await classifyDomainsWithLlm({
+        engine,
+        all: false,
+        onBatch: (done: number, total: number) => {
+          const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+          const elapsed = Math.round((Date.now() - domStart) / 1000);
+          process.stderr.write(`  Domains: ${done}/${total} (${pct}%) | ${elapsed}s elapsed\n`);
+        },
+      });
+      console.log(`\nDomains: ${domResult.classified}/${domResult.totalUnclassified} classified`);
     }));
 
   // ── classify-domains ────────────────────────────────────────────────────
