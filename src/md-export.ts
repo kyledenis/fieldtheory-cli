@@ -16,6 +16,7 @@ import { ensureDir, writeMd } from './fs.js';
 import { mdDir } from './paths.js';
 import { listBookmarks, countBookmarks, type BookmarkTimelineItem } from './bookmarks-db.js';
 import { slug } from './md.js';
+import { parseAnyDateToIso } from './date-utils.js';
 
 export interface ExportOptions {
   force?: boolean;
@@ -34,7 +35,8 @@ function bookmarksDir(): string {
 }
 
 function bookmarkFilename(b: BookmarkTimelineItem): string {
-  const date = (b.postedAt ?? b.bookmarkedAt ?? '').slice(0, 10) || 'undated';
+  const isoDate = parseAnyDateToIso(b.postedAt) ?? parseAnyDateToIso(b.bookmarkedAt);
+  const date = isoDate ? isoDate.slice(0, 10) : 'undated';
   const author = b.authorHandle ? slug(b.authorHandle) : 'unknown';
   const textSlug = slug(b.text.slice(0, 50)) || b.id;
   return `${date}-${author}-${textSlug}.md`;
@@ -47,8 +49,10 @@ function buildBookmarkMd(b: BookmarkTimelineItem): string {
   lines.push('---');
   if (b.authorHandle) lines.push(`author: "@${b.authorHandle}"`);
   if (b.authorName) lines.push(`author_name: "${b.authorName.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, ' ')}"`);
-  if (b.postedAt) lines.push(`posted_at: ${b.postedAt.slice(0, 10)}`);
-  if (b.bookmarkedAt) lines.push(`bookmarked_at: ${b.bookmarkedAt.slice(0, 10)}`);
+  const postedIso = parseAnyDateToIso(b.postedAt);
+  const bookmarkedIso = parseAnyDateToIso(b.bookmarkedAt);
+  if (postedIso) lines.push(`posted_at: ${postedIso.slice(0, 10)}`);
+  if (bookmarkedIso) lines.push(`bookmarked_at: ${bookmarkedIso.slice(0, 10)}`);
   if (b.primaryCategory) lines.push(`category: ${b.primaryCategory}`);
   if (b.primaryDomain) lines.push(`domain: ${b.primaryDomain}`);
   if (b.categories.length > 0) lines.push(`categories: [${b.categories.join(', ')}]`);
