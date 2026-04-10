@@ -125,6 +125,7 @@ test('convertTweetToRecord: produces a complete record from a full tweet', () =>
   assert.equal(result.syncedAt, NOW);
   assert.equal(result.ingestedVia, 'graphql');
   assert.equal(result.language, 'en');
+  assert.equal(result.postedAt, '2026-03-10T12:00:00.000Z');
 });
 
 test('convertTweetToRecord: extracts author snapshot with all fields', () => {

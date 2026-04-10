@@ -5,6 +5,7 @@ import { extractChromeXCookies } from './chrome-cookies.js';
 import { extractFirefoxXCookies } from './firefox-cookies.js';
 import type { BookmarkBackfillState, BookmarkCacheMeta, BookmarkRecord, QuotedTweetSnapshot } from './types.js';
 import { exportBookmarksForSyncSeed, updateQuotedTweets, updateBookmarkText } from './bookmarks-db.js';
+import { parseAnyDateToIso } from './date-utils.js';
 
 const CHROME_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36';
 
@@ -280,7 +281,7 @@ export function convertTweetToRecord(tweetResult: any, now: string): BookmarkRec
         authorName: qtUser?.core?.name ?? qtUser?.legacy?.name,
         authorProfileImageUrl:
           qtUser?.avatar?.image_url ?? qtUser?.legacy?.profile_image_url_https,
-        postedAt: qtLegacy.created_at ?? null,
+        postedAt: parseAnyDateToIso(qtLegacy.created_at) ?? qtLegacy.created_at ?? null,
         media: qtMediaEntities.map((m: any) => m.media_url_https ?? m.media_url).filter(Boolean),
         mediaObjects: qtMediaEntities.map((m: any) => ({
           type: m.type,
@@ -307,7 +308,7 @@ export function convertTweetToRecord(tweetResult: any, now: string): BookmarkRec
     authorName,
     authorProfileImageUrl,
     author,
-    postedAt: legacy.created_at ?? null,
+    postedAt: parseAnyDateToIso(legacy.created_at) ?? legacy.created_at ?? null,
     bookmarkedAt: null,
     syncedAt: now,
     conversationId: legacy.conversation_id_str,
