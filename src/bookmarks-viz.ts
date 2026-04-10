@@ -156,51 +156,28 @@ async function queryVizData(): Promise<VizData> {
        GROUP BY author_handle ORDER BY c DESC LIMIT 20`
     );
 
-    // Twitter legacy format: "Sat Mar 28 18:55:23 +0000 2026"
-    // Normalize both legacy and ISO timestamps into the same YYYY-MM bucket.
-    const legacyMonthNumberExpr = `CASE substr(bookmarked_at, 5, 3)
-      WHEN 'Jan' THEN '01' WHEN 'Feb' THEN '02' WHEN 'Mar' THEN '03'
-      WHEN 'Apr' THEN '04' WHEN 'May' THEN '05' WHEN 'Jun' THEN '06'
-      WHEN 'Jul' THEN '07' WHEN 'Aug' THEN '08' WHEN 'Sep' THEN '09'
-      WHEN 'Oct' THEN '10' WHEN 'Nov' THEN '11' WHEN 'Dec' THEN '12'
-      ELSE '00'
-    END`;
-    const monthBucketExpr = `CASE
-      WHEN bookmarked_at GLOB '____-__-__*' THEN substr(bookmarked_at, 1, 7)
-      ELSE substr(bookmarked_at, -4) || '-' || ${legacyMonthNumberExpr}
-    END`;
-
     const monthlyRows = db.exec(
       `SELECT
-         ${monthBucketExpr} as ym,
+         substr(posted_at, 1, 7) as ym,
          COUNT(*) as c
-       FROM bookmarks WHERE bookmarked_at IS NOT NULL
+       FROM bookmarks WHERE posted_at IS NOT NULL
        GROUP BY ym ORDER BY ym`
     );
 
-    // Day of week — first 3 chars for legacy, strftime('%w') for ISO
-    // SQLite %w: 0=Sunday, 1=Monday... We can map them if we want, but the chart just uses 'dow' as a string key
     const dowRows = db.exec(
-      `SELECT 
-         CASE
-           WHEN bookmarked_at GLOB '____-__-__*' THEN 
-             CASE strftime('%w', bookmarked_at)
-               WHEN '0' THEN 'Sun' WHEN '1' THEN 'Mon' WHEN '2' THEN 'Tue'
-               WHEN '3' THEN 'Wed' WHEN '4' THEN 'Thu' WHEN '5' THEN 'Fri' WHEN '6' THEN 'Sat' END
-           ELSE substr(bookmarked_at, 1, 3)
+      `SELECT
+         CASE strftime('%w', posted_at)
+           WHEN '0' THEN 'Sun' WHEN '1' THEN 'Mon' WHEN '2' THEN 'Tue'
+           WHEN '3' THEN 'Wed' WHEN '4' THEN 'Thu' WHEN '5' THEN 'Fri' WHEN '6' THEN 'Sat'
          END as dow, COUNT(*) as c
-       FROM bookmarks WHERE bookmarked_at IS NOT NULL
+       FROM bookmarks WHERE posted_at IS NOT NULL
        GROUP BY dow ORDER BY c DESC`
     );
 
-    // Hour of day — chars 12-13 for legacy, strftime('%H') for ISO
     const hourRows = db.exec(
-      `SELECT 
-         CASE
-           WHEN bookmarked_at GLOB '____-__-__*' THEN CAST(strftime('%H', bookmarked_at) AS INTEGER)
-           ELSE CAST(substr(bookmarked_at, 12, 2) AS INTEGER)
-         END as h, COUNT(*) as c
-       FROM bookmarks WHERE bookmarked_at IS NOT NULL
+      `SELECT
+         CAST(strftime('%H', posted_at) AS INTEGER) as h, COUNT(*) as c
+       FROM bookmarks WHERE posted_at IS NOT NULL
        GROUP BY h ORDER BY h`
     );
 
@@ -245,7 +222,7 @@ async function queryVizData(): Promise<VizData> {
     const recentAuthorsRows = db.exec(
       `SELECT author_handle, COUNT(*) as c FROM bookmarks
        WHERE author_handle IS NOT NULL
-       AND bookmarked_at >= (SELECT MAX(bookmarked_at) FROM bookmarks)
+       AND posted_at >= (SELECT MAX(posted_at) FROM bookmarks)
        GROUP BY author_handle ORDER BY c DESC LIMIT 10`
     );
 
@@ -288,9 +265,9 @@ async function queryVizData(): Promise<VizData> {
 
     // Rising voices: authors with 3+ bookmarks, all from the most recent month
     const latestMonth = db.exec(
-      `SELECT ${monthBucketExpr}
-       FROM bookmarks WHERE bookmarked_at IS NOT NULL
-       ORDER BY bookmarked_at DESC LIMIT 1`
+      `SELECT substr(posted_at, 1, 7)
+       FROM bookmarks WHERE posted_at IS NOT NULL
+       ORDER BY posted_at DESC LIMIT 1`
     )[0]?.values[0]?.[0] as string | undefined;
 
     let risingVoices: { handle: string; count: number }[] = [];
@@ -300,7 +277,7 @@ async function queryVizData(): Promise<VizData> {
          WHERE author_handle IS NOT NULL
          GROUP BY author_handle
          HAVING c >= 3
-         AND MIN(${monthBucketExpr}) = ?
+         AND MIN(substr(posted_at, 1, 7)) = ?
          ORDER BY c DESC LIMIT 8`,
         [latestMonth]
       );
