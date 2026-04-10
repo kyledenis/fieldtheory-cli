@@ -5,8 +5,9 @@ import { twitterBookmarksCachePath, twitterBookmarksIndexPath } from './paths.js
 import type { BookmarkRecord, QuotedTweetSnapshot } from './types.js';
 import { classifyCorpus, formatClassificationSummary } from './bookmark-classify.js';
 import type { ClassificationSummary } from './bookmark-classify.js';
+import { twitterDateToIso } from './date-utils.js';
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 export interface SearchResult {
   id: string;
@@ -234,6 +235,25 @@ function ensureMigrations(db: Database): void {
     const tableExists = db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='bookmarks'");
     if (tableExists.length && tableExists[0].values.length > 0) {
       try { db.run('ALTER TABLE bookmarks ADD COLUMN quoted_tweet_json TEXT'); } catch { /* already exists */ }
+    }
+  }
+  if (version < 5) {
+    const tableExists = db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='bookmarks'");
+    if (tableExists.length && tableExists[0].values.length > 0) {
+      // Convert Twitter legacy date strings to ISO 8601 in posted_at
+      const rows = db.exec(
+        `SELECT id, posted_at FROM bookmarks WHERE posted_at IS NOT NULL AND posted_at NOT GLOB '____-__-__*'`
+      );
+      if (rows.length && rows[0].values.length > 0) {
+        const stmt = db.prepare('UPDATE bookmarks SET posted_at = ? WHERE id = ?');
+        for (const row of rows[0].values) {
+          const id = row[0] as string;
+          const legacy = row[1] as string;
+          const iso = twitterDateToIso(legacy);
+          if (iso) stmt.run([iso, id]);
+        }
+        stmt.free();
+      }
     }
   }
   if (version < SCHEMA_VERSION) {
