@@ -385,12 +385,20 @@ export function parseBookmarksResponse(json: any, now?: string): PageResult {
 
 async function fetchPageWithRetry(csrfToken: string, cursor?: string, cookieHeader?: string, pageSize?: number): Promise<PageResult> {
   let lastError: Error | undefined;
+  let rateLimited = false;
 
   for (let attempt = 0; attempt < 4; attempt++) {
     const response = await fetch(buildUrl(cursor, pageSize), { headers: buildHeaders(csrfToken, cookieHeader) });
 
     if (response.status === 429) {
-      const waitSec = Math.min(15 * Math.pow(2, attempt), 120);
+      rateLimited = true;
+      // Twitter's rate window is ~15 min. Respect a Retry-After header if
+      // present; otherwise back off exponentially up to 2 min before failing.
+      const retryAfterHeader = response.headers.get('retry-after');
+      const headerWait = retryAfterHeader ? Number(retryAfterHeader) : NaN;
+      const waitSec = Number.isFinite(headerWait) && headerWait > 0
+        ? Math.min(headerWait, 120)
+        : Math.min(15 * Math.pow(2, attempt), 120);
       lastError = new Error(`Rate limited (429) on attempt ${attempt + 1}`);
       await new Promise((r) => setTimeout(r, waitSec * 1000));
       continue;
@@ -417,6 +425,16 @@ async function fetchPageWithRetry(csrfToken: string, cursor?: string, cookieHead
     return parseBookmarksResponse(json);
   }
 
+  if (rateLimited) {
+    throw new Error(
+      `Rate limited by X's bookmarks API after 4 retries.\n` +
+      `\n` +
+      `Your progress has been saved. Wait ~15 minutes, then resume with:\n` +
+      `  ft sync --continue\n` +
+      `\n` +
+      `If you keep hitting this, try increasing --delay-ms (e.g. --delay-ms 2000).`
+    );
+  }
   throw lastError ?? new Error('GraphQL Bookmarks API: all retry attempts failed. Try again later.');
 }
 
@@ -542,6 +560,25 @@ export async function syncBookmarksGraphQL(
   const allSeenIds: string[] = [];
   let stopReason = 'unknown';
 
+  // Persist cursor + JSONL cache together. Called at every checkpoint and in
+  // the finally block, so an interrupted sync (rate limit, Ctrl-C, crash)
+  // still leaves a resumable state on disk.
+  const persistCheckpoint = async (reason: string) => {
+    try {
+      await writeJsonLines(cachePath, existing);
+      const terminalReasons = new Set(['end of bookmarks', 'caught up to newest stored bookmark']);
+      const savedCursor = terminalReasons.has(reason) ? undefined : cursor;
+      await writeJson(statePath, updateState(prevState, {
+        added: totalAdded,
+        seenIds: allSeenIds.slice(-20),
+        stopReason: reason,
+        lastRunAt: new Date().toISOString(),
+        lastCursor: savedCursor,
+      }));
+    } catch { /* best-effort persistence */ }
+  };
+
+  try {
   while (page < maxPages) {
     if (Date.now() - started > maxMinutes * 60_000) {
       stopReason = 'max runtime reached';
@@ -592,7 +629,7 @@ export async function syncBookmarksGraphQL(
       break;
     }
 
-    if (page % checkpointEvery === 0) await writeJsonLines(cachePath, existing);
+    if (page % checkpointEvery === 0) await persistCheckpoint('in-progress');
 
     if (page < maxPages) await new Promise((r) => setTimeout(r, delayMs));
   }
@@ -669,7 +706,7 @@ export async function syncBookmarksGraphQL(
         break;
       }
 
-      if (page % checkpointEvery === 0) await writeJsonLines(cachePath, existing);
+      if (page % checkpointEvery === 0) await persistCheckpoint('in-progress');
 
       if (page < maxPages) await new Promise((r) => setTimeout(r, delayMs));
     }
@@ -678,10 +715,19 @@ export async function syncBookmarksGraphQL(
       stopReason = 'max pages reached';
     }
   }
+  } catch (err) {
+    // Persist whatever progress we have so --continue can resume.
+    // The cursor points to the next page we would have fetched, so the next
+    // run picks up exactly where this one stopped.
+    const errMsg = err instanceof Error ? err.message : String(err);
+    const interruptedReason = `interrupted: ${errMsg}`;
+    await persistCheckpoint(interruptedReason);
+    throw err;
+  }
 
   const syncedAt = new Date().toISOString();
   const bookmarkedAtMissing = existing.filter((record) => !record.bookmarkedAt).length;
-  await writeJsonLines(cachePath, existing);
+  await persistCheckpoint(stopReason);
   await writeJson(metaPath, {
     provider: 'twitter',
     schemaVersion: 1,
@@ -689,17 +735,6 @@ export async function syncBookmarksGraphQL(
     lastIncrementalSyncAt: incremental ? syncedAt : previousMeta?.lastIncrementalSyncAt,
     totalBookmarks: existing.length,
   } satisfies BookmarkCacheMeta);
-  // Save cursor for resumption if sync stopped before reaching the end
-  const terminalReasons = new Set(['end of bookmarks', 'caught up to newest stored bookmark']);
-  const savedCursor = terminalReasons.has(stopReason) ? undefined : cursor;
-
-  await writeJson(statePath, updateState(prevState, {
-    added: totalAdded,
-    seenIds: allSeenIds.slice(-20),
-    stopReason,
-    lastRunAt: syncedAt,
-    lastCursor: savedCursor,
-  }));
 
   options.onProgress?.({
     page,
