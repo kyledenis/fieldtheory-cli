@@ -742,11 +742,34 @@ export function buildCli() {
     .action(safe(async () => {
       if (!requireIndex()) return;
       const stats = await getStats();
-      console.log(`Bookmarks: ${stats.totalBookmarks}`);
-      console.log(`Unique authors: ${stats.uniqueAuthors}`);
-      console.log(`Date range: ${stats.dateRange.earliest?.slice(0, 10) ?? '?'} to ${stats.dateRange.latest?.slice(0, 10) ?? '?'}`);
+      const pct = (n: number, d: number) => d > 0 ? `${Math.round((n / d) * 100)}%` : '0%';
+
+      console.log(`Bookmarks: ${stats.totalBookmarks.toLocaleString()}`);
+      console.log(`Unique authors: ${stats.uniqueAuthors.toLocaleString()}`);
+      console.log(`Posted span:  ${stats.postedRange.earliest?.slice(0, 10) ?? '?'} → ${stats.postedRange.latest?.slice(0, 10) ?? '?'}`);
+      console.log(`Synced span:  ${stats.syncedRange.earliest?.slice(0, 10) ?? '?'} → ${stats.syncedRange.latest?.slice(0, 10) ?? '?'}`);
+
+      console.log(`\nClassification:`);
+      console.log(`  classified:   ${stats.classification.classified.toLocaleString()} (${pct(stats.classification.classified, stats.totalBookmarks)})`);
+      console.log(`  unclassified: ${stats.classification.unclassified.toLocaleString()} (${pct(stats.classification.unclassified, stats.totalBookmarks)})`);
+
+      console.log(`\nContent:`);
+      console.log(`  with media:   ${stats.content.withMedia.toLocaleString()} (${pct(stats.content.withMedia, stats.content.total)})`);
+      console.log(`  with links:   ${stats.content.withLinks.toLocaleString()} (${pct(stats.content.withLinks, stats.content.total)})`);
+
+      if (stats.topCategories.length > 0) {
+        console.log(`\nTop categories:`);
+        for (const c of stats.topCategories) console.log(`  ${c.name}: ${c.count}`);
+      }
+
+      if (stats.topDomains.length > 0) {
+        console.log(`\nTop domains:`);
+        for (const d of stats.topDomains) console.log(`  ${d.name}: ${d.count}`);
+      }
+
       console.log(`\nTop authors:`);
       for (const a of stats.topAuthors) console.log(`  @${a.handle}: ${a.count}`);
+
       console.log(`\nLanguages:`);
       for (const l of stats.languageBreakdown) console.log(`  ${l.language}: ${l.count}`);
     }));

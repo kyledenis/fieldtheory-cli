@@ -9,7 +9,7 @@
 import { openDb, saveDb } from './db.js';
 import { twitterBookmarksIndexPath } from './paths.js';
 import type { ResolvedEngine } from './engine.js';
-import { invokeEngine } from './engine.js';
+import { invokeEngineAsync } from './engine.js';
 
 const BATCH_SIZE = 50;
 
@@ -151,7 +151,7 @@ export async function classifyWithLlm(
 
       try {
         const prompt = buildPrompt(batch);
-        const raw = invokeEngine(engine, prompt);
+        const raw = await invokeEngineAsync(engine, prompt);
         const results = parseResponse(raw, batchIds);
 
         // Update SQLite
@@ -268,7 +268,7 @@ export async function classifyDomainsWithLlm(
 
       try {
         const prompt = buildDomainPrompt(batch);
-        const raw = invokeEngine(engine, prompt);
+        const raw = await invokeEngineAsync(engine, prompt);
         // Reuse the same parse logic — structure is identical
         const results = parseResponse(raw, batchIds);
 

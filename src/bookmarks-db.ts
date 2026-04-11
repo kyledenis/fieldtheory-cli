@@ -651,17 +651,24 @@ export async function getBookmarkById(id: string): Promise<BookmarkTimelineItem 
 export async function getStats(): Promise<{
   totalBookmarks: number;
   uniqueAuthors: number;
-  dateRange: { earliest: string | null; latest: string | null };
+  postedRange: { earliest: string | null; latest: string | null };
+  syncedRange: { earliest: string | null; latest: string | null };
   topAuthors: { handle: string; count: number }[];
   languageBreakdown: { language: string; count: number }[];
+  classification: { classified: number; unclassified: number };
+  content: { withMedia: number; withLinks: number; total: number };
+  topCategories: { name: string; count: number }[];
+  topDomains: { name: string; count: number }[];
 }> {
   const dbPath = twitterBookmarksIndexPath();
   const db = await openDb(dbPath);
+  ensureMigrations(db);
 
   try {
     const total = db.exec('SELECT COUNT(*) FROM bookmarks')[0]?.values[0]?.[0] as number;
     const authors = db.exec('SELECT COUNT(DISTINCT author_handle) FROM bookmarks')[0]?.values[0]?.[0] as number;
-    const range = db.exec('SELECT MIN(posted_at), MAX(posted_at) FROM bookmarks WHERE posted_at IS NOT NULL')[0]?.values[0];
+    const postedRange = db.exec('SELECT MIN(posted_at), MAX(posted_at) FROM bookmarks WHERE posted_at IS NOT NULL')[0]?.values[0];
+    const syncedRange = db.exec('SELECT MIN(synced_at), MAX(synced_at) FROM bookmarks WHERE synced_at IS NOT NULL')[0]?.values[0];
 
     const topAuthorsRows = db.exec(
       `SELECT author_handle, COUNT(*) as c FROM bookmarks
@@ -683,12 +690,58 @@ export async function getStats(): Promise<{
       count: r[1] as number,
     }));
 
+    const classified = db.exec(
+      `SELECT COUNT(*) FROM bookmarks
+       WHERE primary_category IS NOT NULL AND primary_category != 'unclassified'`
+    )[0]?.values[0]?.[0] as number ?? 0;
+    const unclassified = Math.max(0, total - classified);
+
+    const withMedia = db.exec('SELECT COUNT(*) FROM bookmarks WHERE media_count > 0')[0]?.values[0]?.[0] as number ?? 0;
+    const withLinks = db.exec('SELECT COUNT(*) FROM bookmarks WHERE link_count > 0')[0]?.values[0]?.[0] as number ?? 0;
+
+    let topCategories: { name: string; count: number }[] = [];
+    try {
+      const catRows = db.exec(
+        `SELECT primary_category, COUNT(*) as c FROM bookmarks
+         WHERE primary_category IS NOT NULL AND primary_category != 'unclassified'
+         GROUP BY primary_category ORDER BY c DESC LIMIT 10`
+      );
+      topCategories = (catRows[0]?.values ?? []).map((r) => ({
+        name: r[0] as string,
+        count: r[1] as number,
+      }));
+    } catch { /* column may not exist */ }
+
+    let topDomains: { name: string; count: number }[] = [];
+    try {
+      const domRows = db.exec(
+        `SELECT primary_domain, COUNT(*) as c FROM bookmarks
+         WHERE primary_domain IS NOT NULL AND primary_domain != ''
+         GROUP BY primary_domain ORDER BY c DESC LIMIT 10`
+      );
+      topDomains = (domRows[0]?.values ?? []).map((r) => ({
+        name: r[0] as string,
+        count: r[1] as number,
+      }));
+    } catch { /* column may not exist */ }
+
     return {
       totalBookmarks: total,
       uniqueAuthors: authors,
-      dateRange: { earliest: (range?.[0] as string) ?? null, latest: (range?.[1] as string) ?? null },
+      postedRange: {
+        earliest: (postedRange?.[0] as string) ?? null,
+        latest: (postedRange?.[1] as string) ?? null,
+      },
+      syncedRange: {
+        earliest: (syncedRange?.[0] as string) ?? null,
+        latest: (syncedRange?.[1] as string) ?? null,
+      },
       topAuthors,
       languageBreakdown,
+      classification: { classified, unclassified },
+      content: { withMedia, withLinks, total },
+      topCategories,
+      topDomains,
     };
   } finally {
     db.close();
