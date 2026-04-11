@@ -127,11 +127,11 @@ function buildBookmarkWhereClause(filters: BookmarkTimelineFilters): {
     params.push(filters.author);
   }
   if (filters.after) {
-    conditions.push(`COALESCE(b.posted_at, b.bookmarked_at) >= ?`);
+    conditions.push(`COALESCE(b.posted_at, b.synced_at) >= ?`);
     params.push(filters.after);
   }
   if (filters.before) {
-    conditions.push(`COALESCE(b.posted_at, b.bookmarked_at) <= ?`);
+    conditions.push(`COALESCE(b.posted_at, b.synced_at) <= ?`);
     params.push(filters.before);
   }
   if (filters.category) {
@@ -151,10 +151,15 @@ function buildBookmarkWhereClause(filters: BookmarkTimelineFilters): {
 
 function bookmarkSortClause(direction: 'asc' | 'desc' = 'desc'): string {
   const normalized = direction === 'asc' ? 'ASC' : 'DESC';
+  // Prefer synced_at (always populated, always ISO — closest to "when you
+  // bookmarked it" for incremental syncs). Fall back to posted_at for rows
+  // that predate synced_at being reliable. bookmarked_at is deliberately
+  // excluded because it's derived from Twitter's sortIndex, which is an
+  // opaque sort key rather than a real timestamp.
   return `
     ORDER BY
       CASE
-        WHEN b.bookmarked_at GLOB '____-__-__*' THEN b.bookmarked_at
+        WHEN b.synced_at GLOB '____-__-__*' THEN b.synced_at
         WHEN b.posted_at GLOB '____-__-__*' THEN b.posted_at
         ELSE ''
       END ${normalized},
