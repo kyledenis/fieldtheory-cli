@@ -72,6 +72,12 @@ export interface SyncOptions {
   resumeCursor?: string;
   /** Flush to disk every N pages. Default: 25 */
   checkpointEvery?: number;
+  /**
+   * Abort signal. When aborted mid-sync, the current page finishes, then the
+   * loop breaks out and the normal save path runs — cursor is persisted so
+   * the next --continue resumes from exactly where this run stopped.
+   */
+  signal?: AbortSignal;
 }
 
 export interface SyncProgress {
@@ -580,6 +586,10 @@ export async function syncBookmarksGraphQL(
 
   try {
   while (page < maxPages) {
+    if (options.signal?.aborted) {
+      stopReason = 'interrupted by user';
+      break;
+    }
     if (Date.now() - started > maxMinutes * 60_000) {
       stopReason = 'max runtime reached';
       break;
@@ -669,6 +679,10 @@ export async function syncBookmarksGraphQL(
 
     // Continue paginating with no stale-page or caught-up limits
     while (page < maxPages) {
+      if (options.signal?.aborted) {
+        stopReason = 'interrupted by user';
+        break;
+      }
       if (Date.now() - started > maxMinutes * 60_000) {
         stopReason = 'max runtime reached';
         break;

@@ -40,8 +40,17 @@ import { createRequire } from 'node:module';
 const SPINNER = ['\u280b', '\u2819', '\u2839', '\u2838', '\u283c', '\u2834', '\u2826', '\u2827', '\u2807', '\u280f'];
 let spinnerIdx = 0;
 
-/** Creates a spinner that animates independently of data callbacks. */
-function createSpinner(renderLine: () => string): { update: () => void; stop: () => void } {
+/**
+ * Creates a spinner that animates independently of data callbacks.
+ *
+ * If `onInterrupt` is provided, it replaces the default SIGINT behaviour
+ * (stop + process.exit). Use this when the caller needs to do async cleanup
+ * before exiting — e.g. sync needs to persist its cursor before dying.
+ */
+function createSpinner(
+  renderLine: () => string,
+  onInterrupt?: () => void,
+): { update: () => void; stop: () => void } {
   let line = '';
   let stopped = false;
   const tick = () => {
@@ -57,9 +66,13 @@ function createSpinner(renderLine: () => string): { update: () => void; stop: ()
     process.stderr.write('\n');
   };
 
-  // Graceful interrupt — stop spinner, show friendly message
+  // Graceful interrupt — either run the caller's cleanup or the default.
   const onSigint = () => {
     stop();
+    if (onInterrupt) {
+      onInterrupt();
+      return;
+    }
     console.log('\n  Interrupted. Your data is safe \u2014 progress has been saved.');
     console.log('  Run the same command again to pick up where you left off.\n');
     process.exit(0);
@@ -532,13 +545,30 @@ export function buildCli() {
         } else {
           const startTime = Date.now();
           let lastSync: SyncProgress = { page: 0, totalFetched: 0, newAdded: 0, running: true, done: false };
-          const spinner = createSpinner(() => {
-            const elapsed = Math.round((Date.now() - startTime) / 1000);
-            if (lastSync.stopReason && lastSync.running) {
-              return `${lastSync.stopReason}  \u2502  ${lastSync.newAdded} new  \u2502  ${elapsed}s`;
-            }
-            return `Syncing bookmarks...  ${lastSync.newAdded} new  \u2502  page ${lastSync.page}  \u2502  ${elapsed}s`;
-          });
+          // AbortController lets Ctrl-C signal the sync loop to stop
+          // gracefully — it finishes the current page, breaks out of the
+          // loop, and runs the normal save path so the cursor is persisted.
+          const abortController = new AbortController();
+          let interrupted = false;
+          const spinner = createSpinner(
+            () => {
+              const elapsed = Math.round((Date.now() - startTime) / 1000);
+              if (lastSync.stopReason && lastSync.running) {
+                return `${lastSync.stopReason}  \u2502  ${lastSync.newAdded} new  \u2502  ${elapsed}s`;
+              }
+              return `Syncing bookmarks...  ${lastSync.newAdded} new  \u2502  page ${lastSync.page}  \u2502  ${elapsed}s`;
+            },
+            () => {
+              // User hit Ctrl-C — signal sync to stop gracefully. The loop
+              // will finish its current page, persist the cursor, and return
+              // normally. We don't exit here — we let the sync flow complete.
+              if (!interrupted) {
+                interrupted = true;
+                abortController.abort();
+                process.stderr.write('\n  Stopping gracefully — saving progress...\n');
+              }
+            },
+          );
           // Parse --cookies <ct0> [auth_token] — variadic, gives us an array
           let csrfToken: string | undefined;
           let cookieHeader: string | undefined;
@@ -585,12 +615,18 @@ export function buildCli() {
             chromeUserDataDir: options.chromeUserDataDir ? String(options.chromeUserDataDir) : undefined,
             chromeProfileDirectory: options.chromeProfileDirectory ? String(options.chromeProfileDirectory) : undefined,
             firefoxProfileDir: options.firefoxProfileDir ? String(options.firefoxProfileDir) : undefined,
+            signal: abortController.signal,
             onProgress: (status: SyncProgress) => {
               lastSync = status;
               spinner.update();
             },
           }));
 
+          if (interrupted) {
+            console.log(`\n  \u2713 ${result.added} new bookmarks saved before interrupt (${result.totalBookmarks} total)`);
+            console.log(`  Cursor saved — resume with: ft sync --continue\n`);
+            process.exit(0);
+          }
           console.log(`\n  \u2713 ${result.added} new bookmarks synced (${result.totalBookmarks} total)`);
           console.log(`  ${friendlyStopReason(result.stopReason)}`);
           if (result.bookmarkedAtRepaired > 0) {
