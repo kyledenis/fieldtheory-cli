@@ -5,7 +5,7 @@ import { twitterBookmarksCachePath, twitterBookmarksIndexPath } from './paths.js
 import type { BookmarkRecord, QuotedTweetSnapshot } from './types.js';
 import { classifyCorpus, formatClassificationSummary } from './bookmark-classify.js';
 import type { ClassificationSummary } from './bookmark-classify.js';
-import { twitterDateToIso } from './date-utils.js';
+import { twitterDateToIso, parseAnyDateToIso } from './date-utils.js';
 
 const SCHEMA_VERSION = 5;
 
@@ -219,7 +219,26 @@ function initSchema(db: Database): void {
     tokenize='porter unicode61'
   )`);
 
-  db.run(`REPLACE INTO meta VALUES ('schema_version', '${SCHEMA_VERSION}')`);
+  // Note: schema_version is written by ensureMigrations(), NOT here.
+  // Writing it in initSchema() would make ensureMigrations() read the
+  // current version and skip all migration blocks, which means old DBs
+  // would never get their new columns added.
+}
+
+/**
+ * Defensive column check: get the set of columns currently on the bookmarks
+ * table. Used by ensureMigrations() to add any columns missing from old DBs
+ * regardless of the recorded schema version.
+ */
+function getBookmarkColumns(db: Database): Set<string> {
+  const cols = new Set<string>();
+  try {
+    const rows = db.exec('PRAGMA table_info(bookmarks)');
+    for (const row of rows[0]?.values ?? []) {
+      cols.add(row[1] as string);
+    }
+  } catch { /* table may not exist yet */ }
+  return cols;
 }
 
 function ensureMigrations(db: Database): void {
@@ -261,6 +280,26 @@ function ensureMigrations(db: Database): void {
       }
     }
   }
+
+  // ── Defensive column check ────────────────────────────────────────────
+  // Some old DBs slipped through with the schema_version bumped but
+  // migrations skipped (bug: initSchema wrote the version before
+  // ensureMigrations read it). Add any missing columns regardless of
+  // recorded version. Runs after all version-gated migrations.
+  const tableExists = db.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='bookmarks'");
+  if (tableExists.length && tableExists[0].values.length > 0) {
+    const cols = getBookmarkColumns(db);
+    const required: Array<{ name: string; sql: string }> = [
+      { name: 'domains',           sql: 'ALTER TABLE bookmarks ADD COLUMN domains TEXT' },
+      { name: 'primary_domain',    sql: 'ALTER TABLE bookmarks ADD COLUMN primary_domain TEXT' },
+      { name: 'quoted_tweet_json', sql: 'ALTER TABLE bookmarks ADD COLUMN quoted_tweet_json TEXT' },
+    ];
+    for (const col of required) {
+      if (!cols.has(col.name)) {
+        try { db.run(col.sql); } catch { /* concurrent migration or bad state */ }
+      }
+    }
+  }
   if (version < SCHEMA_VERSION) {
     db.run(`REPLACE INTO meta VALUES ('schema_version', '${SCHEMA_VERSION}')`);
   }
@@ -282,6 +321,12 @@ function insertRecord(db: Database, r: BookmarkRecord, preserved?: PreservedBook
   const githubFromLinks = (r.links ?? []).filter((l) => /github\.com/i.test(l));
   const githubUrls = [...new Set([...githubMatches.map((m) => `https://${m}`), ...githubFromLinks])];
 
+  // Normalize postedAt to ISO 8601 when writing to the DB. Old JSONL cache
+  // entries may have Twitter legacy format ("Wed Apr 08 06:30:15 +0000 2026");
+  // parseAnyDateToIso converts those to ISO and passes ISO dates through
+  // unchanged. Falls back to the raw value if parsing fails so no data is lost.
+  const postedAtIso = parseAnyDateToIso(r.postedAt) ?? r.postedAt ?? null;
+
   db.run(
     `INSERT OR REPLACE INTO bookmarks VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     [
@@ -292,7 +337,7 @@ function insertRecord(db: Database, r: BookmarkRecord, preserved?: PreservedBook
       r.authorHandle ?? null,
       r.authorName ?? null,
       r.authorProfileImageUrl ?? null,
-      r.postedAt ?? null,
+      postedAtIso,
       r.bookmarkedAt ?? null,
       r.syncedAt,
       r.conversationId ?? null,
