@@ -100,6 +100,15 @@ export interface SyncResult {
   statePath: string;
 }
 
+/** Delay that resolves immediately if the AbortSignal fires. */
+function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
+  });
+}
+
 function parseSnowflake(value?: string | null): bigint | null {
   if (!value || !/^\d+$/.test(value)) return null;
   try {
@@ -389,30 +398,45 @@ export function parseBookmarksResponse(json: any, now?: string): PageResult {
   return { records, nextCursor };
 }
 
-async function fetchPageWithRetry(csrfToken: string, cursor?: string, cookieHeader?: string, pageSize?: number): Promise<PageResult> {
+async function fetchPageWithRetry(csrfToken: string, cursor?: string, cookieHeader?: string, pageSize?: number, signal?: AbortSignal): Promise<PageResult> {
   let lastError: Error | undefined;
   let rateLimited = false;
 
   for (let attempt = 0; attempt < 4; attempt++) {
-    const response = await fetch(buildUrl(cursor, pageSize), { headers: buildHeaders(csrfToken, cookieHeader) });
+    // Bail immediately if the user interrupted via Ctrl-C.
+    if (signal?.aborted) {
+      throw new Error('Sync interrupted by user');
+    }
+
+    let response: Response;
+    try {
+      response = await fetch(buildUrl(cursor, pageSize), {
+        headers: buildHeaders(csrfToken, cookieHeader),
+        signal,  // cancels the in-flight request on Ctrl-C
+      });
+    } catch (err: any) {
+      // AbortError from signal — not a network failure, just user interrupt.
+      if (err?.name === 'AbortError' || signal?.aborted) {
+        throw new Error('Sync interrupted by user');
+      }
+      throw err;
+    }
 
     if (response.status === 429) {
       rateLimited = true;
-      // Twitter's rate window is ~15 min. Respect a Retry-After header if
-      // present; otherwise back off exponentially up to 2 min before failing.
       const retryAfterHeader = response.headers.get('retry-after');
       const headerWait = retryAfterHeader ? Number(retryAfterHeader) : NaN;
       const waitSec = Number.isFinite(headerWait) && headerWait > 0
         ? Math.min(headerWait, 120)
         : Math.min(15 * Math.pow(2, attempt), 120);
       lastError = new Error(`Rate limited (429) on attempt ${attempt + 1}`);
-      await new Promise((r) => setTimeout(r, waitSec * 1000));
+      await abortableDelay(waitSec * 1000, signal);
       continue;
     }
 
     if (response.status >= 500) {
       lastError = new Error(`Server error (${response.status}) on attempt ${attempt + 1}`);
-      await new Promise((r) => setTimeout(r, 5000 * (attempt + 1)));
+      await abortableDelay(5000 * (attempt + 1), signal);
       continue;
     }
 
@@ -595,7 +619,7 @@ export async function syncBookmarksGraphQL(
       break;
     }
 
-    const result = await fetchPageWithRetry(csrfToken, cursor, cookieHeader, pageSize);
+    const result = await fetchPageWithRetry(csrfToken, cursor, cookieHeader, pageSize, options.signal);
     page += 1;
 
     if (result.records.length === 0 && !result.nextCursor) {
@@ -641,7 +665,7 @@ export async function syncBookmarksGraphQL(
 
     if (page % checkpointEvery === 0) await persistCheckpoint('in-progress');
 
-    if (page < maxPages) await new Promise((r) => setTimeout(r, delayMs));
+    if (page < maxPages) await abortableDelay(delayMs, options.signal);
   }
 
   if (stopReason === 'unknown') stopReason = page >= maxPages ? 'max pages reached' : 'unknown';
@@ -688,7 +712,7 @@ export async function syncBookmarksGraphQL(
         break;
       }
 
-      const result = await fetchPageWithRetry(csrfToken, cursor, cookieHeader, pageSize);
+      const result = await fetchPageWithRetry(csrfToken, cursor, cookieHeader, pageSize, options.signal);
       page += 1;
 
       if (result.records.length === 0 && !result.nextCursor) {
@@ -722,7 +746,7 @@ export async function syncBookmarksGraphQL(
 
       if (page % checkpointEvery === 0) await persistCheckpoint('in-progress');
 
-      if (page < maxPages) await new Promise((r) => setTimeout(r, delayMs));
+      if (page < maxPages) await abortableDelay(delayMs, options.signal);
     }
 
     if (stopReason !== 'end of bookmarks' && page >= maxPages) {

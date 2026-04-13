@@ -4,7 +4,7 @@ import { syncTwitterBookmarks } from './bookmarks.js';
 import { getBookmarkStatusView, formatBookmarkStatus } from './bookmarks-service.js';
 import { runTwitterOAuthFlow } from './xauth.js';
 import { syncBookmarksGraphQL, syncGaps } from './graphql-bookmarks.js';
-import type { SyncProgress, GapFillProgress } from './graphql-bookmarks.js';
+import type { SyncProgress, SyncResult, GapFillProgress } from './graphql-bookmarks.js';
 import { fetchBookmarkMediaBatch } from './bookmark-media.js';
 import {
   buildIndex,
@@ -496,9 +496,9 @@ export function buildCli() {
               }
               console.log(`  Details: ${logPath}`);
             }
-            if (result.bookmarkedAtMissing > 0) {
-              console.log(`  ${result.bookmarkedAtMissing} bookmarks missing a reliable bookmark date`);
-            }
+            // bookmarkedAtMissing is no longer surfaced — bookmarkedAt is
+            // unreliable (opaque sortIndex) and the viz/sort code now uses
+            // synced_at. Reporting this just alarmed users with no actionable fix.
           }
           return;
         }
@@ -595,46 +595,61 @@ export function buildCli() {
             }
           }
 
-          // When continuing without a cursor, disable stale page limit so we can
-          // page through all existing bookmarks to reach the ones beyond the old cap.
-          // With a saved cursor we skip straight to where we left off, so the normal
-          // stale limit is fine.
-          const continueWithoutCursor = Boolean(options.continue) && !resumeCursor;
-
-          const result = await runWithSpinner(spinner, () => syncBookmarksGraphQL({
-            incremental: !Boolean(options.rebuild) && !Boolean(options.continue),
-            resumeCursor,
-            stalePageLimit: continueWithoutCursor ? Infinity : undefined,
-            maxPages: options.maxPages != null ? Number(options.maxPages) : undefined,
-            targetAdds: typeof options.targetAdds === 'number' && !Number.isNaN(options.targetAdds) ? options.targetAdds : undefined,
-            delayMs: Number(options.delayMs) || 600,
-            maxMinutes: Number(options.maxMinutes) || 30,
-            browser: options.browser ? String(options.browser) : undefined,
-            csrfToken,
-            cookieHeader,
-            chromeUserDataDir: options.chromeUserDataDir ? String(options.chromeUserDataDir) : undefined,
-            chromeProfileDirectory: options.chromeProfileDirectory ? String(options.chromeProfileDirectory) : undefined,
-            firefoxProfileDir: options.firefoxProfileDir ? String(options.firefoxProfileDir) : undefined,
-            signal: abortController.signal,
-            onProgress: (status: SyncProgress) => {
-              lastSync = status;
-              spinner.update();
-            },
-          }));
+          // --continue means "exhaustively scan past existing bookmarks to
+          // find ones beyond the old 500-page cap". The stale-page limit only
+          // makes sense for normal incremental syncs — in continue mode we
+          // always want to keep paging until we reach the actual end, because
+          // the saved cursor might still be in the scan-past-existing phase.
+          let result: SyncResult;
+          try {
+            result = await runWithSpinner(spinner, () => syncBookmarksGraphQL({
+              incremental: !Boolean(options.rebuild) && !Boolean(options.continue),
+              resumeCursor,
+              stalePageLimit: options.continue ? Infinity : undefined,
+              maxPages: options.maxPages != null ? Number(options.maxPages) : undefined,
+              targetAdds: typeof options.targetAdds === 'number' && !Number.isNaN(options.targetAdds) ? options.targetAdds : undefined,
+              delayMs: Number(options.delayMs) || 600,
+              maxMinutes: Number(options.maxMinutes) || 30,
+              browser: options.browser ? String(options.browser) : undefined,
+              csrfToken,
+              cookieHeader,
+              chromeUserDataDir: options.chromeUserDataDir ? String(options.chromeUserDataDir) : undefined,
+              chromeProfileDirectory: options.chromeProfileDirectory ? String(options.chromeProfileDirectory) : undefined,
+              firefoxProfileDir: options.firefoxProfileDir ? String(options.firefoxProfileDir) : undefined,
+              signal: abortController.signal,
+              onProgress: (status: SyncProgress) => {
+                lastSync = status;
+                spinner.update();
+              },
+            }));
+          } catch (err) {
+            if (interrupted) {
+              // User hit Ctrl-C — not an error. The sync persisted its
+              // cursor inside the catch block, so --continue will resume
+              // from the exact page where we stopped.
+              console.log(`\n  \u2713 Synced ${lastSync.newAdded} new bookmarks before interrupt (page ${lastSync.page})`);
+              console.log(`  Cursor saved — resume with: ft sync --continue\n`);
+              return;
+            }
+            throw err; // real error — let safe() handle it
+          }
 
           if (interrupted) {
             console.log(`\n  \u2713 ${result.added} new bookmarks saved before interrupt (${result.totalBookmarks} total)`);
             console.log(`  Cursor saved — resume with: ft sync --continue\n`);
-            process.exit(0);
+            return;
           }
           console.log(`\n  \u2713 ${result.added} new bookmarks synced (${result.totalBookmarks} total)`);
           console.log(`  ${friendlyStopReason(result.stopReason)}`);
           if (result.bookmarkedAtRepaired > 0) {
             console.log(`  \u2713 ${result.bookmarkedAtRepaired} invalid bookmark dates cleared`);
           }
-          if (result.bookmarkedAtMissing > 0) {
-            console.log(`  ${result.bookmarkedAtMissing} bookmarks missing a reliable bookmark date`);
-          }
+          // Note: we deliberately don't report result.bookmarkedAtMissing.
+          // bookmarkedAt is derived from Twitter's opaque sortIndex and is
+          // unreliable — the sanitizer correctly nullifies impossible values,
+          // which trips this counter for most historical bookmarks. The viz
+          // charts and sort clauses now use synced_at instead, so this is
+          // no longer a meaningful warning.
           console.log(`  \u2713 Data: ${dataDir()}\n`);
 
           warnIfEmpty(result.totalBookmarks);
