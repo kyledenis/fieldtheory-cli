@@ -110,7 +110,7 @@ export interface LlmClassifyResult {
 }
 
 export async function classifyWithLlm(
-  options: { engine: ResolvedEngine; onBatch?: (done: number, total: number) => void },
+  options: { engine: ResolvedEngine; model?: string; onBatch?: (done: number, total: number) => void },
 ): Promise<LlmClassifyResult> {
   const { engine } = options;
 
@@ -151,7 +151,7 @@ export async function classifyWithLlm(
 
       try {
         const prompt = buildPrompt(batch);
-        const raw = await invokeEngineAsync(engine, prompt);
+        const raw = await invokeEngineAsync(engine, prompt, { model: options.model });
         const results = parseResponse(raw, batchIds);
 
         // Update SQLite
@@ -223,7 +223,7 @@ ${items}`;
 }
 
 export async function classifyDomainsWithLlm(
-  options: { engine: ResolvedEngine; all?: boolean; onBatch?: (done: number, total: number) => void },
+  options: { engine: ResolvedEngine; model?: string; all?: boolean; onBatch?: (done: number, total: number) => void },
 ): Promise<LlmClassifyResult> {
   const { engine } = options;
 
@@ -268,7 +268,7 @@ export async function classifyDomainsWithLlm(
 
       try {
         const prompt = buildDomainPrompt(batch);
-        const raw = await invokeEngineAsync(engine, prompt);
+        const raw = await invokeEngineAsync(engine, prompt, { model: options.model });
         // Reuse the same parse logic — structure is identical
         const results = parseResponse(raw, batchIds);
 

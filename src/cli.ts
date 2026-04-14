@@ -841,6 +841,7 @@ export function buildCli() {
     .command('classify')
     .description('Classify bookmarks by category and domain using LLM (requires claude or codex CLI)')
     .option('--regex', 'Use simple regex classification instead of LLM')
+    .option('--model <model>', 'LLM model to use (e.g. sonnet, claude-sonnet-4-6)')
     .action(safe(async (options) => {
       if (!requireData()) return;
 
@@ -852,11 +853,13 @@ export function buildCli() {
       if (options.regex) return;
 
       const engine = await resolveEngine();
+      const model = options.model as string | undefined;
 
       let catStart = Date.now();
-      process.stderr.write('\nClassifying categories with LLM (batches of 50, ~2 min per batch)...\n');
+      process.stderr.write(`\nClassifying categories with LLM${model ? ` (${model})` : ''} (batches of 50)...\n`);
       const catResult = await classifyWithLlm({
         engine,
+        model,
         onBatch: (done: number, total: number) => {
           const pct = total > 0 ? Math.round((done / total) * 100) : 0;
           const elapsed = Math.round((Date.now() - catStart) / 1000);
@@ -873,6 +876,7 @@ export function buildCli() {
       process.stderr.write('\nClassifying domains with LLM (batches of 50, ~2 min per batch)...\n');
       const domResult = await classifyDomainsWithLlm({
         engine,
+        model,
         all: false,
         onBatch: (done: number, total: number) => {
           const pct = total > 0 ? Math.round((done / total) * 100) : 0;
@@ -889,13 +893,16 @@ export function buildCli() {
     .command('classify-domains')
     .description('Classify bookmarks by subject domain using LLM (ai, finance, etc.)')
     .option('--all', 'Re-classify all bookmarks, not just missing')
+    .option('--model <model>', 'LLM model to use (e.g. sonnet, claude-sonnet-4-6)')
     .action(safe(async (options) => {
       if (!requireData()) return;
       const engine = await resolveEngine();
+      const model = options.model as string | undefined;
       const start = Date.now();
-      process.stderr.write('Classifying bookmark domains with LLM (batches of 50, ~2 min per batch)...\n');
+      process.stderr.write(`Classifying bookmark domains with LLM${model ? ` (${model})` : ''} (batches of 50)...\n`);
       const result = await classifyDomainsWithLlm({
         engine,
+        model,
         all: options.all ?? false,
         onBatch: (done: number, total: number) => {
           const pct = total > 0 ? Math.round((done / total) * 100) : 0;

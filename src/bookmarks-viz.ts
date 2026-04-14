@@ -156,33 +156,33 @@ async function queryVizData(): Promise<VizData> {
        GROUP BY author_handle ORDER BY c DESC LIMIT 20`
     );
 
-    // Cadence charts bucket by synced_at — the time the bookmark first entered
-    // our local index. This is a reliable proxy for "when you saved it" for
-    // users who sync regularly. (posted_at is when the tweet was written, which
-    // is a different thing; bookmarked_at is unreliable because Twitter's
-    // sortIndex is an opaque sort key rather than a real snowflake.)
+    // Cadence charts use posted_at — the tweet's creation time. This is the
+    // only reliable date we have: bookmarked_at is derived from an opaque
+    // sortIndex (garbage), and synced_at clusters at import time for bulk
+    // imports (useless unless you run cron syncs). posted_at at least shows
+    // temporal patterns in the content you gravitate toward.
     const monthlyRows = db.exec(
       `SELECT
-         substr(synced_at, 1, 7) as ym,
+         substr(posted_at, 1, 7) as ym,
          COUNT(*) as c
-       FROM bookmarks WHERE synced_at IS NOT NULL
+       FROM bookmarks WHERE posted_at IS NOT NULL
        GROUP BY ym ORDER BY ym`
     );
 
     const dowRows = db.exec(
       `SELECT
-         CASE strftime('%w', synced_at)
+         CASE strftime('%w', posted_at)
            WHEN '0' THEN 'Sun' WHEN '1' THEN 'Mon' WHEN '2' THEN 'Tue'
            WHEN '3' THEN 'Wed' WHEN '4' THEN 'Thu' WHEN '5' THEN 'Fri' WHEN '6' THEN 'Sat'
          END as dow, COUNT(*) as c
-       FROM bookmarks WHERE synced_at IS NOT NULL
+       FROM bookmarks WHERE posted_at IS NOT NULL
        GROUP BY dow ORDER BY c DESC`
     );
 
     const hourRows = db.exec(
       `SELECT
-         CAST(strftime('%H', synced_at) AS INTEGER) as h, COUNT(*) as c
-       FROM bookmarks WHERE synced_at IS NOT NULL
+         CAST(strftime('%H', posted_at) AS INTEGER) as h, COUNT(*) as c
+       FROM bookmarks WHERE posted_at IS NOT NULL
        GROUP BY h ORDER BY h`
     );
 
@@ -223,23 +223,23 @@ async function queryVizData(): Promise<VizData> {
 
     const avgLen = db.exec('SELECT AVG(length(text)) FROM bookmarks')[0]?.values[0]?.[0] as number;
 
-    // Top authors from the most recent 30 days of sync activity.
-    // julianday() arithmetic gives us "30 days before the most recent sync".
+    // Top authors from the most recent 30 days of posted content.
     const recentAuthorsRows = db.exec(
       `SELECT author_handle, COUNT(*) as c FROM bookmarks
        WHERE author_handle IS NOT NULL
-         AND synced_at IS NOT NULL
-         AND julianday(synced_at) >= julianday((SELECT MAX(synced_at) FROM bookmarks)) - 30
+         AND posted_at IS NOT NULL
+         AND julianday(posted_at) >= julianday((SELECT MAX(posted_at) FROM bookmarks)) - 30
        GROUP BY author_handle ORDER BY c DESC LIMIT 10`
     );
 
-    // Time capsules: oldest posts, one per year to spread the range
+    // Time capsules: oldest posts, one per year to spread the range.
+    // posted_at is now ISO (YYYY-MM-DD...) so extract year with substr(,1,4).
     const capsuleRows = db.exec(
-      `SELECT author_handle, text, tweet_id, posted_at, substr(posted_at, -4) as yr
+      `SELECT author_handle, text, tweet_id, posted_at, substr(posted_at, 1, 4) as yr
        FROM bookmarks
        WHERE posted_at IS NOT NULL
-       AND CAST(substr(posted_at, -4) AS INTEGER) < 2023
-       GROUP BY substr(posted_at, -4)
+       AND CAST(substr(posted_at, 1, 4) AS INTEGER) < 2023
+       GROUP BY substr(posted_at, 1, 4)
        ORDER BY posted_at ASC
        LIMIT 8`
     );
@@ -270,12 +270,11 @@ async function queryVizData(): Promise<VizData> {
       postedAt: r[3] as string,
     }));
 
-    // Rising voices: authors first seen in the most recent sync month.
-    // Uses synced_at to mean "new to your bookmarks", not "newly posted".
+    // Rising voices: authors whose earliest saved post is from the most recent month.
     const latestMonth = db.exec(
-      `SELECT substr(synced_at, 1, 7)
-       FROM bookmarks WHERE synced_at IS NOT NULL
-       ORDER BY synced_at DESC LIMIT 1`
+      `SELECT substr(posted_at, 1, 7)
+       FROM bookmarks WHERE posted_at IS NOT NULL
+       ORDER BY posted_at DESC LIMIT 1`
     )[0]?.values[0]?.[0] as string | undefined;
 
     let risingVoices: { handle: string; count: number }[] = [];
@@ -285,7 +284,7 @@ async function queryVizData(): Promise<VizData> {
          WHERE author_handle IS NOT NULL
          GROUP BY author_handle
          HAVING c >= 3
-         AND MIN(substr(synced_at, 1, 7)) = ?
+         AND MIN(substr(posted_at, 1, 7)) = ?
          ORDER BY c DESC LIMIT 8`,
         [latestMonth]
       );
@@ -430,7 +429,7 @@ function renderActivity(data: VizData): string[] {
 
   lines.push('');
   lines.push(`  ${C.warm}${BOLD}RHYTHM${RESET}`);
-  lines.push(`  ${C.dim}monthly bookmarking cadence${RESET}`);
+  lines.push(`  ${C.dim}when your saved tweets were posted${RESET}`);
   lines.push('');
 
   // Sparkline overview
@@ -464,7 +463,7 @@ function renderDayOfWeek(data: VizData): string[] {
 
   lines.push('');
   lines.push(`  ${C.green}${BOLD}WEEKLY PULSE${RESET}`);
-  lines.push(`  ${C.dim}which days you bookmark${RESET}`);
+  lines.push(`  ${C.dim}which days your saved content was posted${RESET}`);
   lines.push('');
   lines.push(`  ${brailleChart(counts, 14, C.green)}`);
   lines.push('');
@@ -493,7 +492,7 @@ function renderHourOfDay(data: VizData): string[] {
 
   lines.push('');
   lines.push(`  ${C.cyan}${BOLD}DAILY ARC${RESET}`);
-  lines.push(`  ${C.dim}when you reach for the bookmark button${RESET}`);
+  lines.push(`  ${C.dim}what time of day your saved content was posted${RESET}`);
   lines.push('');
 
   // Vertical bar chart using blocks

@@ -148,11 +148,20 @@ export async function resolveEngine(): Promise<ResolvedEngine> {
 export interface InvokeOptions {
   timeout?: number;
   maxBuffer?: number;
+  /** Model override — passed as --model <name> to the engine CLI. */
+  model?: string;
+}
+
+function buildArgs(engine: ResolvedEngine, prompt: string, model?: string): string[] {
+  const baseArgs = engine.config.args(prompt);
+  if (!model) return baseArgs;
+  // Insert --model <name> before the prompt (last arg) for both claude and codex.
+  return ['--model', model, ...baseArgs];
 }
 
 export function invokeEngine(engine: ResolvedEngine, prompt: string, opts: InvokeOptions = {}): string {
-  const { bin, args } = engine.config;
-  return execFileSync(bin, args(prompt), {
+  const { bin } = engine.config;
+  return execFileSync(bin, buildArgs(engine, prompt, opts.model), {
     encoding: 'utf-8',
     timeout: opts.timeout ?? 120_000,
     maxBuffer: opts.maxBuffer ?? 1024 * 1024,
@@ -165,9 +174,9 @@ export function invokeEngine(engine: ResolvedEngine, prompt: string, opts: Invok
  * setInterval callbacks continue to fire while the LLM runs.
  */
 export function invokeEngineAsync(engine: ResolvedEngine, prompt: string, opts: InvokeOptions = {}): Promise<string> {
-  const { bin, args } = engine.config;
+  const { bin } = engine.config;
   return new Promise((resolve, reject) => {
-    execFile(bin, args(prompt), {
+    execFile(bin, buildArgs(engine, prompt, opts.model), {
       encoding: 'utf-8',
       timeout: opts.timeout ?? 120_000,
       maxBuffer: opts.maxBuffer ?? 1024 * 1024,

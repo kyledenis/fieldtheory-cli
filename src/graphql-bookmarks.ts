@@ -670,16 +670,13 @@ export async function syncBookmarksGraphQL(
 
   if (stopReason === 'unknown') stopReason = page >= maxPages ? 'max pages reached' : 'unknown';
 
-  // ── Auto-continue: detect users stuck at the old 10k cap ──────────
-  // If we finished an incremental sync, the user has ≥9,500 bookmarks,
-  // and there's a cursor to keep going, automatically page through to
-  // find bookmarks the old 20-per-page × 500-page cap missed.
-  const OLD_CAP_THRESHOLD = 9_500;
-  const terminalStops = new Set(['end of bookmarks']);
+  // ── Auto-continue: only when the user explicitly passed --continue ──
+  // Scans past existing bookmarks to find ones beyond the old 500-page
+  // cap. On a normal incremental sync, we stop after catching up — the
+  // user shouldn't wait 10+ minutes re-scanning their entire collection.
+  const terminalStops = new Set(['end of bookmarks', 'interrupted by user']);
   const shouldAutoContinue =
-    incremental &&
-    !options.resumeCursor &&
-    existing.length >= OLD_CAP_THRESHOLD &&
+    !incremental &&            // --continue sets incremental=false
     !terminalStops.has(stopReason) &&
     cursor != null;
 
