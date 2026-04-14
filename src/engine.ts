@@ -152,11 +152,17 @@ export interface InvokeOptions {
   model?: string;
 }
 
+/**
+ * Default model for all LLM invocations. Sonnet is more than capable for
+ * every ft task (classification, wiki generation, Q&A) and is significantly
+ * cheaper than Opus. Users can override per-command with --model <name>.
+ */
+const DEFAULT_MODEL = 'sonnet';
+
 function buildArgs(engine: ResolvedEngine, prompt: string, model?: string): string[] {
   const baseArgs = engine.config.args(prompt);
-  if (!model) return baseArgs;
-  // Insert --model <name> before the prompt (last arg) for both claude and codex.
-  return ['--model', model, ...baseArgs];
+  const effectiveModel = model ?? DEFAULT_MODEL;
+  return ['--model', effectiveModel, ...baseArgs];
 }
 
 export function invokeEngine(engine: ResolvedEngine, prompt: string, opts: InvokeOptions = {}): string {

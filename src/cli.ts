@@ -853,10 +853,10 @@ export function buildCli() {
       if (options.regex) return;
 
       const engine = await resolveEngine();
-      const model = options.model as string | undefined;
+      const model = (options.model as string | undefined) ?? 'sonnet';
 
       let catStart = Date.now();
-      process.stderr.write(`\nClassifying categories with LLM${model ? ` (${model})` : ''} (batches of 50)...\n`);
+      process.stderr.write(`\nClassifying categories with LLM (${model}) (batches of 50)...\n`);
       const catResult = await classifyWithLlm({
         engine,
         model,
@@ -897,9 +897,9 @@ export function buildCli() {
     .action(safe(async (options) => {
       if (!requireData()) return;
       const engine = await resolveEngine();
-      const model = options.model as string | undefined;
+      const model = (options.model as string | undefined) ?? 'sonnet';
       const start = Date.now();
-      process.stderr.write(`Classifying bookmark domains with LLM${model ? ` (${model})` : ''} (batches of 50)...\n`);
+      process.stderr.write(`Classifying bookmark domains with LLM (${model}) (batches of 50)...\n`);
       const result = await classifyDomainsWithLlm({
         engine,
         model,
