@@ -74,7 +74,7 @@ test('detectAvailableEngines: returns array of available engines', async () => {
 
   // Each entry should be a known engine name
   for (const name of available) {
-    assert.ok(['claude', 'codex'].includes(name), `unexpected engine: ${name}`);
+    assert.ok(['claude', 'codex', 'ollama'].includes(name), `unexpected engine: ${name}`);
   }
 });
 

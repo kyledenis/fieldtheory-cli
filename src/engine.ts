@@ -15,16 +15,30 @@ import { PromptCancelledError, promptText } from './prompt.js';
 
 export interface EngineConfig {
   bin: string;
-  args: (prompt: string) => string[];
+  args: (prompt: string, model?: string) => string[];
+  /** Default model for this engine when none is specified. */
+  defaultModel?: string;
 }
 
 const KNOWN_ENGINES: Record<string, EngineConfig> = {
-  claude: { bin: 'claude', args: (p) => ['-p', '--output-format', 'text', p] },
-  codex:  { bin: 'codex',  args: (p) => ['exec', p] },
+  claude: {
+    bin: 'claude',
+    args: (p, model) => [...(model ? ['--model', model] : []), '-p', '--output-format', 'text', p],
+    defaultModel: 'sonnet',
+  },
+  codex: {
+    bin: 'codex',
+    args: (p) => ['exec', p],
+  },
+  ollama: {
+    bin: 'ollama',
+    args: (p, model) => ['run', model ?? 'qwen3.5:27b', p],
+    defaultModel: 'qwen3.5:27b',
+  },
 };
 
-/** Order used when auto-detecting. */
-const PREFERENCE_ORDER = ['claude', 'codex'];
+/** Order used when auto-detecting. Prefer local (free) over cloud. */
+const PREFERENCE_ORDER = ['ollama', 'claude', 'codex'];
 
 // ── Detection ──────────────────────────────────────────────────────────
 
@@ -152,24 +166,18 @@ export interface InvokeOptions {
   model?: string;
 }
 
-/**
- * Default model for all LLM invocations. Sonnet is more than capable for
- * every ft task (classification, wiki generation, Q&A) and is significantly
- * cheaper than Opus. Users can override per-command with --model <name>.
- */
-const DEFAULT_MODEL = 'sonnet';
-
 function buildArgs(engine: ResolvedEngine, prompt: string, model?: string): string[] {
-  const baseArgs = engine.config.args(prompt);
-  const effectiveModel = model ?? DEFAULT_MODEL;
-  return ['--model', effectiveModel, ...baseArgs];
+  // Each engine handles model placement in its own args() function.
+  // Pass the effective model (explicit override → engine default → undefined).
+  const effectiveModel = model ?? engine.config.defaultModel;
+  return engine.config.args(prompt, effectiveModel);
 }
 
 export function invokeEngine(engine: ResolvedEngine, prompt: string, opts: InvokeOptions = {}): string {
   const { bin } = engine.config;
   return execFileSync(bin, buildArgs(engine, prompt, opts.model), {
     encoding: 'utf-8',
-    timeout: opts.timeout ?? 120_000,
+    timeout: opts.timeout ?? 300_000,
     maxBuffer: opts.maxBuffer ?? 1024 * 1024,
     stdio: ['pipe', 'pipe', 'ignore'],
   }).trim();
@@ -184,7 +192,7 @@ export function invokeEngineAsync(engine: ResolvedEngine, prompt: string, opts: 
   return new Promise((resolve, reject) => {
     execFile(bin, buildArgs(engine, prompt, opts.model), {
       encoding: 'utf-8',
-      timeout: opts.timeout ?? 120_000,
+      timeout: opts.timeout ?? 300_000,
       maxBuffer: opts.maxBuffer ?? 1024 * 1024,
     }, (err, stdout) => {
       if (err) return reject(err);
