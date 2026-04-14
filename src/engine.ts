@@ -18,6 +18,58 @@ export interface EngineConfig {
   args: (prompt: string, model?: string) => string[];
   /** Default model for this engine when none is specified. */
   defaultModel?: string;
+  /** Dynamically detect the best available model. Called once at resolve time. */
+  detectModel?: () => string | undefined;
+}
+
+/**
+ * Query `ollama list` and return all installed models with metadata.
+ */
+function listOllamaModels(): { name: string; sizeGb: number; paramB: number }[] {
+  try {
+    const output = execFileSync('ollama', ['list'], {
+      encoding: 'utf-8',
+      timeout: 5_000,
+      stdio: ['pipe', 'pipe', 'ignore'],
+    });
+    const models: { name: string; sizeGb: number; paramB: number }[] = [];
+    for (const line of output.split('\n').slice(1)) {  // skip header
+      const parts = line.trim().split(/\s+/);
+      if (parts.length < 3) continue;
+      const name = parts[0];
+      const sizeMatch = line.match(/([\d.]+)\s*GB/i);
+      const sizeGb = sizeMatch ? parseFloat(sizeMatch[1]) : 0;
+      // Extract parameter count from the model name/tag, e.g. "qwen3.5:27b" → 27
+      const paramMatch = name.match(/:(\d+)b/i);
+      const paramB = paramMatch ? parseInt(paramMatch[1], 10) : 0;
+      if (name && sizeGb > 0) models.push({ name, sizeGb, paramB });
+    }
+    return models;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Pick the best ollama model for ft's classification/wiki tasks.
+ *
+ * Strategy: pick the largest model that fits comfortably in memory.
+ * For classification, quality matters more than speed — a 27B model
+ * produces much better JSON than a 9B model. But a 35B model that
+ * causes swapping is worse than a 27B that fits in RAM.
+ *
+ * Heuristic: prefer models with the highest parameter count. If two
+ * models have similar param counts, prefer the smaller disk footprint
+ * (likely a more efficient quantization). This naturally picks e.g.
+ * qwen3.5:27b over qwen3.5:9b, and qwen3.5:35b-a3b over qwen3.5:27b
+ * if both are installed.
+ */
+function detectOllamaModel(): string | undefined {
+  const models = listOllamaModels();
+  if (models.length === 0) return undefined;
+  // Sort by param count desc, then by disk size asc (prefer efficient quant)
+  models.sort((a, b) => b.paramB - a.paramB || a.sizeGb - b.sizeGb);
+  return models[0].name;
 }
 
 const KNOWN_ENGINES: Record<string, EngineConfig> = {
@@ -33,12 +85,19 @@ const KNOWN_ENGINES: Record<string, EngineConfig> = {
   ollama: {
     bin: 'ollama',
     args: (p, model) => ['run', model ?? 'qwen3.5:27b', p],
-    defaultModel: 'qwen3.5:27b',
+    detectModel: detectOllamaModel,
   },
 };
 
 /** Order used when auto-detecting. Prefer local (free) over cloud. */
 const PREFERENCE_ORDER = ['ollama', 'claude', 'codex'];
+
+/** Get the effective model name for a given engine (detected or default). */
+export function getEngineModelInfo(engineName: string): string | undefined {
+  const cfg = KNOWN_ENGINES[engineName];
+  if (!cfg) return undefined;
+  return cfg.detectModel?.() ?? cfg.defaultModel;
+}
 
 // ── Detection ──────────────────────────────────────────────────────────
 
@@ -168,8 +227,8 @@ export interface InvokeOptions {
 
 function buildArgs(engine: ResolvedEngine, prompt: string, model?: string): string[] {
   // Each engine handles model placement in its own args() function.
-  // Pass the effective model (explicit override → engine default → undefined).
-  const effectiveModel = model ?? engine.config.defaultModel;
+  // Priority: explicit override → auto-detected → hardcoded default.
+  const effectiveModel = model ?? engine.config.detectModel?.() ?? engine.config.defaultModel;
   return engine.config.args(prompt, effectiveModel);
 }
 

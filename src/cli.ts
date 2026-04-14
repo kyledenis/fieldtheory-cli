@@ -20,7 +20,7 @@ import {
 } from './bookmarks-db.js';
 import { formatClassificationSummary } from './bookmark-classify.js';
 import { classifyWithLlm, classifyDomainsWithLlm } from './bookmark-classify-llm.js';
-import { resolveEngine, detectAvailableEngines } from './engine.js';
+import { resolveEngine, detectAvailableEngines, getEngineModelInfo } from './engine.js';
 import { loadPreferences, savePreferences } from './preferences.js';
 import { compileMd } from './md.js';
 import { askMd } from './md-ask.js';
@@ -957,7 +957,9 @@ export function buildCli() {
       console.log('  Available engines:\n');
       for (const name of available) {
         const marker = name === prefs.defaultEngine ? ' (default)' : '';
-        console.log(`    ${name}${marker}`);
+        const model = getEngineModelInfo(name);
+        const modelInfo = model ? ` → ${model}` : '';
+        console.log(`    ${name}${marker}${modelInfo}`);
       }
       console.log();
 
