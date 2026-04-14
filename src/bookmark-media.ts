@@ -52,7 +52,7 @@ async function loadManifest(): Promise<MediaFetchManifest | null> {
 }
 
 export async function fetchBookmarkMediaBatch(
-  options: { limit?: number; maxBytes?: number } = {}
+  options: { limit?: number; maxBytes?: number; onProgress?: (status: { processed: number; downloaded: number; failed: number; total: number }) => void } = {}
 ): Promise<MediaFetchManifest> {
   const limit = options.limit ?? 100;
   const maxBytes = options.maxBytes ?? 50 * 1024 * 1024;
@@ -201,6 +201,7 @@ export async function fetchBookmarkMediaBatch(
         });
         failed += 1;
       }
+      options.onProgress?.({ processed, downloaded, failed, total: candidates.length });
     }
   }
 
