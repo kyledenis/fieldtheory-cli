@@ -855,36 +855,46 @@ export function buildCli() {
       const engine = await resolveEngine();
       const model = (options.model as string | undefined) ?? 'sonnet';
 
-      let catStart = Date.now();
-      process.stderr.write(`\nClassifying categories with LLM (${model}) (batches of 50)...\n`);
-      const catResult = await classifyWithLlm({
-        engine,
-        model,
-        onBatch: (done: number, total: number) => {
-          const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-          const elapsed = Math.round((Date.now() - catStart) / 1000);
-          process.stderr.write(`  Categories: ${done}/${total} (${pct}%) | ${elapsed}s elapsed\n`);
-        },
-      });
-      console.log(`\nEngine: ${catResult.engine}`);
-      console.log(`Categories: ${catResult.classified}/${catResult.totalUnclassified} classified`);
-      if (catResult.failed > 0) {
-        console.log(`  (${catResult.failed} failed — the regex baseline still covers these)`);
-      }
+      try {
+        let catStart = Date.now();
+        process.stderr.write(`\nClassifying categories with LLM (${model}) (batches of 50)...\n`);
+        const catResult = await classifyWithLlm({
+          engine,
+          model,
+          onBatch: (done: number, total: number) => {
+            const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+            const elapsed = Math.round((Date.now() - catStart) / 1000);
+            process.stderr.write(`  Categories: ${done}/${total} (${pct}%) | ${elapsed}s elapsed\n`);
+          },
+        });
+        console.log(`\nEngine: ${catResult.engine}`);
+        console.log(`Categories: ${catResult.classified}/${catResult.totalUnclassified} classified`);
+        if (catResult.failed > 0) {
+          console.log(`  (${catResult.failed} failed — the regex baseline still covers these)`);
+        }
 
-      let domStart = Date.now();
-      process.stderr.write('\nClassifying domains with LLM (batches of 50, ~2 min per batch)...\n');
-      const domResult = await classifyDomainsWithLlm({
-        engine,
-        model,
-        all: false,
-        onBatch: (done: number, total: number) => {
-          const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-          const elapsed = Math.round((Date.now() - domStart) / 1000);
-          process.stderr.write(`  Domains: ${done}/${total} (${pct}%) | ${elapsed}s elapsed\n`);
-        },
-      });
-      console.log(`\nDomains: ${domResult.classified}/${domResult.totalUnclassified} classified`);
+        let domStart = Date.now();
+        process.stderr.write('\nClassifying domains with LLM (batches of 50, ~2 min per batch)...\n');
+        const domResult = await classifyDomainsWithLlm({
+          engine,
+          model,
+          all: false,
+          onBatch: (done: number, total: number) => {
+            const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+            const elapsed = Math.round((Date.now() - domStart) / 1000);
+            process.stderr.write(`  Domains: ${done}/${total} (${pct}%) | ${elapsed}s elapsed\n`);
+          },
+        });
+        console.log(`\nDomains: ${domResult.classified}/${domResult.totalUnclassified} classified`);
+      } catch (err) {
+        const msg = (err as Error).message ?? '';
+        if (msg.includes('SIGTERM') || msg.includes('SIGINT') || msg.includes('killed') || msg.includes('signal')) {
+          console.log(`\n  Interrupted. Progress saved — completed batches are kept.`);
+          console.log(`  Run ft classify again to continue from where you left off.\n`);
+          return;
+        }
+        throw err;
+      }
     }));
 
   // ── classify-domains ────────────────────────────────────────────────────
@@ -1087,10 +1097,17 @@ export function buildCli() {
     .option('--max-bytes <n>', 'Per-asset byte limit', (v: string) => Number(v), 50 * 1024 * 1024)
     .action(safe(async (options) => {
       if (!requireData()) return;
+      let lastLine = 'starting…';
+      const spinner = createSpinner(() => lastLine);
       const result = await fetchBookmarkMediaBatch({
         limit: Number(options.limit) || 100,
         maxBytes: Number(options.maxBytes) || 50 * 1024 * 1024,
+        onProgress: ({ processed, downloaded, failed, total }) => {
+          lastLine = `${processed}/${total} processed  |  ${downloaded} downloaded  |  ${failed} failed`;
+          spinner.update();
+        },
       });
+      spinner.stop();
       console.log(JSON.stringify(result, null, 2));
     }));
 
