@@ -5,7 +5,7 @@
  * Remembers the user's choice in ~/.ft-bookmarks/.preferences.
  */
 
-import { execFileSync, execFile } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { loadPreferences, savePreferences } from './preferences.js';
@@ -80,7 +80,7 @@ const KNOWN_ENGINES: Record<string, EngineConfig> = {
   },
   codex: {
     bin: 'codex',
-    args: (p) => ['exec', p],
+    args: (p) => ['exec', '--skip-git-repo-check', p],
   },
   ollama: {
     bin: 'ollama',
@@ -154,10 +154,16 @@ export function detectAvailableEngines(): string[] {
 async function askYesNo(question: string): Promise<boolean> {
   const result = await promptText(question);
   if (result.kind === 'interrupt') {
-    throw new PromptCancelledError('Cancelled before selecting a model.', 130);
+    throw new PromptCancelledError(
+      'Cancelled — no engine selected. Pick one with `ft model <engine>`, or pass `--engine claude` / `--engine codex`.',
+      130,
+    );
   }
   if (result.kind === 'close') {
-    throw new PromptCancelledError('No model selected.', 0);
+    throw new PromptCancelledError(
+      'No engine selected. Pick one with `ft model <engine>`, or pass `--engine claude` / `--engine codex`.',
+      0,
+    );
   }
   return result.value.toLowerCase().startsWith('y');
 }
@@ -263,28 +269,172 @@ export interface InvokeOptions {
   maxTokens?: number;
 }
 
+/**
+ * Structured failure from an engine invocation.
+ *
+ * Carries the pieces a caller needs to build a useful error message:
+ * - `stderr`: whatever the child wrote before it died (may be empty)
+ * - `killed`: true when we killed it ourselves (timeout / maxBuffer cap)
+ * - `code`/`signal`: standard exit info
+ *
+ * We avoid stuffing the prompt into `.message` — the prompt can be tens of
+ * kilobytes, and `execFile`'s built-in "Command failed: <cmd + args>" format
+ * blew up the `log.md` entries for `ft wiki` by consuming the entire
+ * truncation budget with prompt bytes, leaving no room for the actual
+ * failure signal. Callers should prefer `.stderr` / `.killed` over
+ * `.message` for user-facing output.
+ */
+export class EngineInvocationError extends Error {
+  readonly engine: string;
+  readonly bin: string;
+  readonly stderr: string;
+  readonly killed: boolean;
+  readonly code: number | null;
+  readonly signal: NodeJS.Signals | null;
+  readonly reason: 'timeout' | 'maxbuffer' | 'exit' | 'spawn';
+
+  constructor(params: {
+    engine: string;
+    bin: string;
+    stderr: string;
+    killed: boolean;
+    code: number | null;
+    signal: NodeJS.Signals | null;
+    reason: 'timeout' | 'maxbuffer' | 'exit' | 'spawn';
+    message: string;
+  }) {
+    super(params.message);
+    this.name = 'EngineInvocationError';
+    this.engine = params.engine;
+    this.bin = params.bin;
+    this.stderr = params.stderr;
+    this.killed = params.killed;
+    this.code = params.code;
+    this.signal = params.signal;
+    this.reason = params.reason;
+  }
+}
+
+const DEFAULT_TIMEOUT   = 120_000;
+const DEFAULT_MAXBUF    = 1024 * 1024;
+const STDERR_TAIL_BYTES = 4096;     // clipped tail shown in errors/logs
+const STDERR_HARD_CAP   = 64 * 1024; // hard ceiling on in-memory stderr buffering
+const SIGKILL_GRACE_MS  = 2_000;     // grace period between SIGTERM and SIGKILL
+
+/** Clip the tail of a buffer to a byte budget — engines put the "what went
+ *  wrong" line at the end of stderr. */
+function tailString(buf: Buffer, bytes: number): string {
+  if (buf.length <= bytes) return buf.toString('utf-8');
+  return '\u2026' + buf.subarray(buf.length - bytes).toString('utf-8');
+}
+
+/**
+ * Strip high-confidence secret shapes from child stderr before it lands in
+ * an error object or `log.md`.
+ */
+export function redactSecrets(s: string): string {
+  return s
+    .replace(/\bsk-[A-Za-z0-9_-]{16,}/g, 'sk-***REDACTED***')
+    .replace(/\b(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{16,}/g, '$1_***REDACTED***')
+    .replace(/\bBearer\s+[A-Za-z0-9._-]{16,}/gi, 'Bearer ***REDACTED***');
+}
+
+/** Build a user-facing failure message. Does NOT inline the prompt. */
+function buildMessage(
+  engineName: string,
+  reason: 'timeout' | 'maxbuffer' | 'exit' | 'spawn',
+  stderr: string,
+  code: number | null,
+  signal: NodeJS.Signals | null,
+  timeoutMs: number,
+): string {
+  const stderrSnippet = stderr.trim().slice(-500);
+  const detail = stderrSnippet ? ` \u2014 ${stderrSnippet}` : '';
+  switch (reason) {
+    case 'timeout':
+      return `${engineName} timed out after ${Math.round(timeoutMs / 1000)}s${detail}`;
+    case 'maxbuffer':
+      return `${engineName} output exceeded buffer cap${detail}`;
+    case 'spawn':
+      return `${engineName} failed to start${detail}`;
+    case 'exit':
+    default: {
+      const signalPart = signal ? ` (signal ${signal})` : '';
+      const codePart   = code !== null ? ` exit ${code}` : '';
+      return `${engineName} failed${codePart}${signalPart}${detail}`;
+    }
+  }
+}
+
 function buildArgs(engine: ResolvedEngine, prompt: string, model?: string): string[] {
   const effectiveModel = model ?? engine.config.detectModel?.() ?? engine.config.defaultModel;
   return engine.config.args(prompt, effectiveModel);
 }
 
 /**
- * @deprecated Use invokeEngineAsync instead. Sync invocation only supports
- * CLI engines and will throw for local/API modes.
+ * Synchronous engine call — uses `spawnSync` with `input: ''` so the child's
+ * stdin is closed with EOF before it starts reading. Only supports CLI engines.
  */
 export function invokeEngine(engine: ResolvedEngine, prompt: string, opts: InvokeOptions = {}): string {
   const { bin } = engine.config;
-  return execFileSync(bin, buildArgs(engine, prompt, opts.model), {
-    encoding: 'utf-8',
-    timeout: opts.timeout ?? 300_000,
-    maxBuffer: opts.maxBuffer ?? 1024 * 1024,
-    stdio: ['pipe', 'pipe', 'ignore'],
-  }).trim();
+  const timeout   = opts.timeout   ?? DEFAULT_TIMEOUT;
+  const maxBuffer = opts.maxBuffer ?? DEFAULT_MAXBUF;
+
+  const result = spawnSync(bin, buildArgs(engine, prompt, opts.model), {
+    input: '',
+    timeout,
+    maxBuffer,
+    encoding: 'buffer',
+  });
+
+  const stderrBuf = result.stderr ?? Buffer.alloc(0);
+  const stderr    = redactSecrets(tailString(stderrBuf, STDERR_TAIL_BYTES));
+
+  if (result.error) {
+    const anyErr = result.error as NodeJS.ErrnoException & { code?: string };
+    if (anyErr.code === 'ETIMEDOUT') {
+      throw new EngineInvocationError({
+        engine: engine.name, bin, stderr,
+        killed: true, code: null, signal: 'SIGTERM', reason: 'timeout',
+        message: buildMessage(engine.name, 'timeout', stderr, null, 'SIGTERM', timeout),
+      });
+    }
+    if (anyErr.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') {
+      throw new EngineInvocationError({
+        engine: engine.name, bin, stderr,
+        killed: true, code: null, signal: null, reason: 'maxbuffer',
+        message: buildMessage(engine.name, 'maxbuffer', stderr, null, null, timeout),
+      });
+    }
+    throw new EngineInvocationError({
+      engine: engine.name, bin,
+      stderr: '', killed: false, code: null, signal: null, reason: 'spawn',
+      message: buildMessage(engine.name, 'spawn', anyErr.message ?? '', null, null, timeout),
+    });
+  }
+
+  if (result.signal === 'SIGTERM' && (result.status === null || result.status === 143)) {
+    throw new EngineInvocationError({
+      engine: engine.name, bin, stderr,
+      killed: true, code: result.status, signal: result.signal, reason: 'timeout',
+      message: buildMessage(engine.name, 'timeout', stderr, result.status, result.signal, timeout),
+    });
+  }
+
+  if (result.status !== 0) {
+    throw new EngineInvocationError({
+      engine: engine.name, bin, stderr,
+      killed: false, code: result.status, signal: result.signal, reason: 'exit',
+      message: buildMessage(engine.name, 'exit', stderr, result.status, result.signal, timeout),
+    });
+  }
+
+  return (result.stdout ?? Buffer.alloc(0)).toString('utf-8').trim();
 }
 
 /**
  * Async invocation — dispatches to the correct backend based on saved
- * engine config. Supports all three modes: local (HTTP), CLI (execFile),
+ * engine config. Supports all three modes: local (HTTP), CLI (spawn),
  * and API (direct Anthropic/OpenAI).
  */
 export async function invokeEngineAsync(engine: ResolvedEngine, prompt: string, opts: InvokeOptions = {}): Promise<string> {
@@ -320,14 +470,106 @@ export async function invokeEngineAsync(engine: ResolvedEngine, prompt: string, 
 
   // ── CLI mode (default — also handles legacy configs without engine.mode) ──
   const { bin } = engine.config;
+  const timeout   = opts.timeout   ?? DEFAULT_TIMEOUT;
+  const maxBuffer = opts.maxBuffer ?? DEFAULT_MAXBUF;
+
   return new Promise((resolve, reject) => {
-    execFile(bin, buildArgs(engine, prompt, opts.model), {
-      encoding: 'utf-8',
-      timeout: opts.timeout ?? 300_000,
-      maxBuffer: opts.maxBuffer ?? 1024 * 1024,
-    }, (err, stdout) => {
-      if (err) return reject(err);
-      resolve(stdout.trim());
+    const child = spawn(bin, buildArgs(engine, prompt, opts.model), {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+
+    try { child.stdin?.end(); } catch { /* spawn error will surface below */ }
+
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const stderrTail = () =>
+      redactSecrets(tailString(Buffer.concat(stderrChunks), STDERR_TAIL_BYTES));
+
+    const killChild = () => {
+      try { child.kill('SIGTERM'); } catch { /* already dead */ }
+      const escalate = setTimeout(() => {
+        try { child.kill('SIGKILL'); } catch { /* already dead */ }
+      }, SIGKILL_GRACE_MS);
+      escalate.unref();
+    };
+
+    const fail = (err: EngineInvocationError) => {
+      if (settled) return;
+      settled = true;
+      if (timer !== undefined) clearTimeout(timer);
+      killChild();
+      reject(err);
+    };
+
+    const succeed = (out: string) => {
+      if (settled) return;
+      settled = true;
+      if (timer !== undefined) clearTimeout(timer);
+      resolve(out);
+    };
+
+    child.stdout?.on('data', (d: Buffer) => {
+      stdoutBytes += d.length;
+      if (stdoutBytes > maxBuffer) {
+        const stderr = stderrTail();
+        fail(new EngineInvocationError({
+          engine: engine.name, bin, stderr,
+          killed: true, code: null, signal: null, reason: 'maxbuffer',
+          message: buildMessage(engine.name, 'maxbuffer', stderr, null, null, timeout),
+        }));
+        return;
+      }
+      stdoutChunks.push(d);
+    });
+
+    child.stderr?.on('data', (d: Buffer) => {
+      stderrChunks.push(d);
+      stderrBytes += d.length;
+      while (stderrBytes > STDERR_HARD_CAP && stderrChunks.length > 1) {
+        const dropped = stderrChunks.shift()!;
+        stderrBytes -= dropped.length;
+      }
+    });
+
+    timer = setTimeout(() => {
+      const stderr = stderrTail();
+      fail(new EngineInvocationError({
+        engine: engine.name, bin, stderr,
+        killed: true, code: null, signal: 'SIGTERM', reason: 'timeout',
+        message: buildMessage(engine.name, 'timeout', stderr, null, 'SIGTERM', timeout),
+      }));
+    }, timeout);
+
+    child.on('error', (err: NodeJS.ErrnoException) => {
+      if (timer !== undefined) clearTimeout(timer);
+      if (settled) return;
+      settled = true;
+      reject(new EngineInvocationError({
+        engine: engine.name, bin,
+        stderr: '', killed: false, code: null, signal: null, reason: 'spawn',
+        message: buildMessage(engine.name, 'spawn', err.message ?? '', null, null, timeout),
+      }));
+    });
+
+    child.on('close', (code, signal) => {
+      if (timer !== undefined) clearTimeout(timer);
+      if (settled) return;
+      const stderr = stderrTail();
+      if (code === 0) {
+        succeed(Buffer.concat(stdoutChunks).toString('utf-8').trim());
+        return;
+      }
+      settled = true;
+      reject(new EngineInvocationError({
+        engine: engine.name, bin, stderr,
+        killed: false, code, signal, reason: 'exit',
+        message: buildMessage(engine.name, 'exit', stderr, code, signal, timeout),
+      }));
     });
   });
 }

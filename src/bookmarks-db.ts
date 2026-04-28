@@ -39,12 +39,17 @@ export interface BookmarkTimelineItem {
   authorProfileImageUrl?: string;
   postedAt?: string | null;
   bookmarkedAt?: string | null;
+  syncedAt?: string | null;
   categories: string[];
   primaryCategory?: string | null;
   domains: string[];
   primaryDomain?: string | null;
   githubUrls: string[];
   links: string[];
+  articleTitle?: string | null;
+  articleText?: string | null;
+  articleSite?: string | null;
+  enrichedAt?: string | null;
   mediaCount: number;
   linkCount: number;
   likeCount?: number | null;
@@ -68,6 +73,12 @@ export interface BookmarkTimelineFilters {
   sort?: 'asc' | 'desc';
   limit?: number;
   offset?: number;
+}
+
+export interface BookmarkClassificationProgress {
+  total: number;
+  categoriesDone: number;
+  domainsDone: number;
 }
 
 function parseJsonArray(value: unknown): string[] {
@@ -140,6 +151,11 @@ function mapTimelineRow(row: unknown[]): BookmarkTimelineItem {
     viewCount: row[22] as number | null,
     folderIds: parseJsonArray(row[23]),
     folderNames: parseJsonArray(row[24]),
+    articleTitle: (row[25] as string) ?? null,
+    articleText: (row[26] as string) ?? null,
+    articleSite: (row[27] as string) ?? null,
+    syncedAt: (row[28] as string) ?? null,
+    enrichedAt: (row[29] as string) ?? null,
   };
 }
 
@@ -674,7 +690,12 @@ export async function listBookmarks(
         b.bookmark_count,
         b.view_count,
         b.folder_ids,
-        b.folder_names
+        b.folder_names,
+        b.article_title,
+        b.article_text,
+        b.article_site,
+        b.synced_at,
+        b.enriched_at
       FROM bookmarks b
       ${where}
       ${bookmarkSortClause(filters.sort)}
@@ -815,7 +836,12 @@ export async function getBookmarkById(id: string): Promise<BookmarkTimelineItem 
         b.bookmark_count,
         b.view_count,
         b.folder_ids,
-        b.folder_names
+        b.folder_names,
+        b.article_title,
+        b.article_text,
+        b.article_site,
+        b.synced_at,
+        b.enriched_at
       FROM bookmarks b
       WHERE b.id = ?
       LIMIT 1`,
@@ -1008,9 +1034,19 @@ export async function getCategoryCounts(existingDb?: Database): Promise<Record<s
   const db = existingDb ?? await openDb(twitterBookmarksIndexPath());
   if (!existingDb) ensureMigrations(db);
   try {
+    // Exclude 'unclassified' — it's the default placeholder for bookmarks
+    // that haven't been run through `ft classify` yet, NOT a real category.
+    // Including it broke `ft wiki`: the wiki scanner would see a huge
+    // "unclassified" count (often N == total bookmarks), pass the
+    // MIN_CATEGORY_COUNT gate, and queue a page generation. But
+    // `sampleByCategory('unclassified', …)` looks up the `categories` column
+    // (a list) rather than `primary_category`, and unclassified rows have
+    // `categories = NULL`, so sampling always returned zero rows. We then
+    // sent the LLM a "summarize these 0 bookmarks" prompt and wasted a
+    // timeout on every compile.
     const rows = db.exec(
       `SELECT primary_category, COUNT(*) as c FROM bookmarks
-       WHERE primary_category IS NOT NULL
+       WHERE primary_category IS NOT NULL AND primary_category != 'unclassified'
        GROUP BY primary_category ORDER BY c DESC`
     );
     const counts: Record<string, number> = {};
@@ -1020,6 +1056,37 @@ export async function getCategoryCounts(existingDb?: Database): Promise<Record<s
     return counts;
   } finally {
     if (!existingDb) db.close();
+  }
+}
+
+export async function getClassificationProgress(): Promise<BookmarkClassificationProgress> {
+  const dbPath = twitterBookmarksIndexPath();
+  let db: Database;
+  try {
+    db = await openDb(dbPath);
+  } catch {
+    return { total: 0, categoriesDone: 0, domainsDone: 0 };
+  }
+
+  try {
+    ensureMigrations(db);
+    const row = db.exec(
+      `SELECT
+         COUNT(*) AS total,
+         SUM(CASE WHEN primary_category IS NOT NULL AND primary_category <> '' AND primary_category <> 'unclassified' THEN 1 ELSE 0 END) AS categories_done,
+         SUM(CASE WHEN primary_domain IS NOT NULL AND primary_domain <> '' THEN 1 ELSE 0 END) AS domains_done
+       FROM bookmarks`
+    )[0]?.values?.[0];
+
+    return {
+      total: Number(row?.[0] ?? 0),
+      categoriesDone: Number(row?.[1] ?? 0),
+      domainsDone: Number(row?.[2] ?? 0),
+    };
+  } catch {
+    return { total: 0, categoriesDone: 0, domainsDone: 0 };
+  } finally {
+    db.close();
   }
 }
 

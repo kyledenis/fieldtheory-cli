@@ -6,7 +6,8 @@ import { runTwitterOAuthFlow } from './xauth.js';
 import { syncBookmarksGraphQL, syncGaps, syncBookmarkFolders } from './graphql-bookmarks.js';
 import type { SyncProgress, SyncResult, GapFillProgress, FolderSyncProgress } from './graphql-bookmarks.js';
 import type { BookmarkFolder } from './types.js';
-import { fetchBookmarkMediaBatch } from './bookmark-media.js';
+import { DEFAULT_MEDIA_MAX_BYTES, fetchBookmarkMediaBatch } from './bookmark-media.js';
+import type { MediaFetchManifest, MediaFetchProgress } from './bookmark-media.js';
 import {
   buildIndex,
   searchBookmarks,
@@ -31,12 +32,15 @@ import { lintMd, fixLintIssues } from './md-lint.js';
 import { exportBookmarks } from './md-export.js';
 import { renderViz } from './bookmarks-viz.js';
 import { listBrowserIds } from './browsers.js';
-import { dataDir, ensureDataDir, isFirstRun, twitterBookmarksIndexPath, twitterBackfillStatePath, mdDir } from './paths.js';
+import { configureHttpProxyFromEnv } from './http-proxy.js';
+import { dataDir, ensureDataDir, isFirstRun, twitterBookmarksIndexPath, twitterBackfillStatePath, mdDir, bookmarkMediaDir, bookmarkMediaManifestPath } from './paths.js';
 import { PromptCancelledError, promptText } from './prompt.js';
 import { skillWithFrontmatter, installSkill, uninstallSkill } from './skill.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+
+configureHttpProxyFromEnv();
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -109,12 +113,77 @@ const FRIENDLY_STOP_REASONS: Record<string, string> = {
   'end of bookmarks': 'Sync complete \u2014 all bookmarks fetched.',
   'max runtime reached': 'Paused after 30 minutes. Run again to continue.',
   'max pages reached': 'Paused after reaching page limit. Run again to continue.',
+  'rate limited': 'Paused by X rate limiting.',
   'target additions reached': 'Reached target bookmark count.',
 };
 
 function friendlyStopReason(raw?: string): string {
   if (!raw) return 'Sync complete.';
   return FRIENDLY_STOP_REASONS[raw] ?? `Sync complete \u2014 ${raw}`;
+}
+
+function formatRetryAfter(seconds?: number): string | undefined {
+  if (!seconds || seconds <= 0) return undefined;
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  return remainingSeconds > 0 ? `${minutes}m ${remainingSeconds}s` : `${minutes}m`;
+}
+
+function printMediaFetchSummary(result: MediaFetchManifest): void {
+  if (result.processed === 0) {
+    console.log('  ✓ No pending media assets found');
+  }
+  console.log(`  ✓ ${result.downloaded} media assets downloaded`);
+  if (result.skippedTooLarge > 0) {
+    console.log(`  ${result.skippedTooLarge} media assets skipped for size`);
+  }
+  if (result.failed > 0) {
+    console.log(`  ${result.failed} media assets failed`);
+  }
+  console.log(`  ✓ Media: ${bookmarkMediaDir()}`);
+  console.log(`  ✓ Manifest: ${bookmarkMediaManifestPath()}`);
+}
+
+async function runMediaFetchWithProgress(options: { limit?: number; maxBytes?: number; skipProfileImages?: boolean } = {}): Promise<MediaFetchManifest> {
+  const startTime = Date.now();
+  let lastMedia: MediaFetchProgress = {
+    candidateBookmarks: 0,
+    processed: 0,
+    downloaded: 0,
+    skippedTooLarge: 0,
+    failed: 0,
+  };
+  const spinner = createSpinner(() => {
+    const elapsed = Math.round((Date.now() - startTime) / 1000);
+    return `Fetching media...  ${lastMedia.processed} processed  │  ${lastMedia.downloaded} downloaded  │  ${elapsed}s`;
+  });
+  const result = await runWithSpinner(spinner, () => fetchBookmarkMediaBatch({
+    limit: options.limit,
+    maxBytes: options.maxBytes,
+    skipProfileImages: options.skipProfileImages,
+    onProgress: (progress: MediaFetchProgress) => {
+      lastMedia = progress;
+      spinner.update();
+    },
+  }));
+  console.log('');
+  printMediaFetchSummary(result);
+  return result;
+}
+
+/**
+ * Parse the `--cookies <ct0> [auth_token]` variadic option into the shape
+ * syncBookmarksGraphQL and syncGaps expect. Returns undefined fields when
+ * the flag wasn't passed, so callers can fall through to browser extraction.
+ */
+export function parseCookieOption(cookies: unknown): { csrfToken?: string; cookieHeader?: string } {
+  if (!cookies || !Array.isArray(cookies) || cookies.length === 0) return {};
+  const csrfToken = String(cookies[0]);
+  const authToken = cookies.length > 1 ? String(cookies[1]) : undefined;
+  const parts = [`ct0=${csrfToken}`];
+  if (authToken) parts.push(`auth_token=${authToken}`);
+  return { csrfToken, cookieHeader: parts.join('; ') };
 }
 
 function warnIfEmpty(totalBookmarks: number): void {
@@ -194,6 +263,34 @@ function showCachedUpdateNotice(): void {
 // ── What's new ────────────────────────────────────────────────────────────
 
 const WHATS_NEW: Record<string, string[]> = {
+  '1.3.18': [
+    'ft sync now downloads media by default; pass --no-media to skip',
+    'ft sync --gaps now also fills media gaps in the same pass',
+  ],
+  '1.3.13': [
+    'ft sync --media now downloads X photos, video posters, capped videos, and quoted-tweet media',
+    'ft fetch-media now backfills missing media across your archive instead of stopping at the first 100 bookmarks',
+    'Media downloads now show live progress and use a 200 MB per-asset cap by default',
+  ],
+  '1.3.12': [
+    'ft md now exports correct ISO dates in bookmark filenames and frontmatter',
+    'ft sync --rebuild now refreshes existing caches without stopping early',
+    'ft classify-domains is more robust when the model adds bracketed commentary',
+    'Bookmark text now expands visible t.co links using display_url',
+    'ft sync now pauses cleanly on X rate limits and saves progress for ft sync --continue',
+    'Paused rebuilds no longer mark a full bookmark crawl as completed',
+  ],
+  '1.3.11': [
+    'ft md now exports correct ISO dates in bookmark filenames and frontmatter',
+    'ft sync --rebuild now refreshes existing caches without stopping early',
+    'ft classify-domains is more robust when the model adds bracketed commentary',
+    'Bookmark text now expands visible t.co links using display_url',
+  ],
+  '1.3.9': [
+    'ft sync now captures full long-form note_tweets (Karpathy-style threads) instead of 275-char previews',
+    'ft sync --gaps backfills existing truncated note_tweets via an authenticated GraphQL path',
+    'ft sync --gaps is now idempotent \u2014 second runs print "No gaps found" instead of re-fetching forever',
+  ],
   '1.3.5': [
     'ft sync --folders \u2014 sync X bookmark folder tags (read-only mirror)',
     'ft sync --folder <name> \u2014 sync a single folder by name',
@@ -275,6 +372,7 @@ export function showWelcome(): void {
 
 export async function showDashboard(): Promise<void> {
   console.log(logo());
+  showWhatsNew();
   try {
     const view = await getBookmarkStatusView();
     const ago = view.lastUpdated ? timeAgo(view.lastUpdated) : 'never';
@@ -304,6 +402,12 @@ export async function showDashboard(): Promise<void> {
   Run: ft sync
 `);
   }
+
+  // The no-args path bypasses Commander, so the postAction update-check
+  // hook never fires here. Call it directly — same 5s network timeout,
+  // 24h cache debounce, and outer try/catch that the subcommand path
+  // already tolerates, so brittleness is bounded to existing behavior.
+  await checkForUpdate();
 }
 
 function timeAgo(dateStr: string): string {
@@ -476,11 +580,7 @@ export function buildCli() {
     .name('ft')
     .description('Self-custody for your X/Twitter bookmarks. Sync, search, classify, and explore locally.')
     .version(getLocalVersion())
-    .showHelpAfterError()
-    .hook('preAction', () => {
-      console.log(logo());
-      showWhatsNew();
-    });
+    .showHelpAfterError();
 
   // ── sync ────────────────────────────────────────────────────────────────
 
@@ -493,6 +593,9 @@ export function buildCli() {
     .option('--gaps', 'Backfill missing data (quoted tweets, truncated articles, linked article content)', false)
     .option('--yes', 'Skip confirmation prompts', false)
     .option('--classify', 'Classify new bookmarks with LLM after syncing', false)
+    .option('--no-media', 'Skip downloading media assets after syncing (default: media is downloaded)')
+    .option('--media-max-bytes <n>', 'Per-asset byte limit for media downloads (default: 200 MB)', (v: string) => Number(v), DEFAULT_MEDIA_MAX_BYTES)
+    .option('--skip-profile-images', 'Skip downloading author profile images', false)
     .option('--max-pages <n>', 'Max pages to fetch (default: unlimited)', (v: string) => Number(v))
     .option('--target-adds <n>', 'Stop after N new bookmarks', (v: string) => Number(v))
     .option('--delay-ms <n>', 'Delay between requests in ms', (v: string) => Number(v), 600)
@@ -542,11 +645,25 @@ export function buildCli() {
           process.exitCode = 1;
           return;
         }
+        // Commander sets options.media=false when --no-media is passed;
+        // otherwise it's true by default.
+        const downloadMedia = options.media !== false;
+        const mediaMaxBytes = typeof options.mediaMaxBytes === 'number' && !Number.isNaN(options.mediaMaxBytes)
+          ? options.mediaMaxBytes
+          : DEFAULT_MEDIA_MAX_BYTES;
+        const postSyncMediaFetch = async (): Promise<void> => {
+          if (!downloadMedia) return;
+          await runMediaFetchWithProgress({ maxBytes: mediaMaxBytes, skipProfileImages: Boolean(options.skipProfileImages) });
+          console.log('');
+        };
 
         // ── gaps mode: backfill missing data for existing bookmarks ──
         if (options.gaps) {
           const startTime = Date.now();
-          process.stderr.write('  Filling gaps (quoted tweets, truncated text, articles)...\n');
+          const opening = downloadMedia
+            ? '  Filling gaps (quoted tweets, truncated text, articles, media)...\n'
+            : '  Filling gaps (quoted tweets, truncated text, articles)...\n';
+          process.stderr.write(opening);
           let lastProgress: GapFillProgress = { done: 0, total: 0, quotedFetched: 0, textExpanded: 0, articlesEnriched: 0, failed: 0 };
           const spinner = createSpinner(() => {
             const p = lastProgress;
@@ -560,8 +677,15 @@ export function buildCli() {
             parts.push(`${elapsed}s`);
             return parts.join(' \u2502 ');
           });
+          const { csrfToken: gapCsrfToken, cookieHeader: gapCookieHeader } = parseCookieOption(options.cookies);
           const result = await runWithSpinner(spinner, () => syncGaps({
             delayMs: Number(options.delayMs) || 300,
+            browser: options.browser ? String(options.browser) : undefined,
+            chromeUserDataDir: options.chromeUserDataDir ? String(options.chromeUserDataDir) : undefined,
+            chromeProfileDirectory: options.chromeProfileDirectory ? String(options.chromeProfileDirectory) : undefined,
+            firefoxProfileDir: options.firefoxProfileDir ? String(options.firefoxProfileDir) : undefined,
+            csrfToken: gapCsrfToken,
+            cookieHeader: gapCookieHeader,
             onProgress: (progress: GapFillProgress) => {
               lastProgress = progress;
               spinner.update();
@@ -596,6 +720,7 @@ export function buildCli() {
             // unreliable (opaque sortIndex) and the viz/sort code now uses
             // synced_at. Reporting this just alarmed users with no actionable fix.
           }
+          await postSyncMediaFetch();
           return;
         }
 
@@ -634,6 +759,7 @@ export function buildCli() {
           console.log(`\n  \u2713 ${result.added} new bookmarks synced (${result.totalBookmarks} total)`);
           console.log(`  \u2713 Data: ${dataDir()}\n`);
           warnIfEmpty(result.totalBookmarks);
+          await postSyncMediaFetch();
           const newCount = await rebuildIndex();
           if (options.classify && newCount > 0) {
             await classifyNew(engineOverride);
@@ -655,9 +781,6 @@ export function buildCli() {
               return `Syncing bookmarks...  ${lastSync.newAdded} new  \u2502  page ${lastSync.page}  \u2502  ${elapsed}s`;
             },
             () => {
-              // User hit Ctrl-C — signal sync to stop gracefully. The loop
-              // will finish its current page, persist the cursor, and return
-              // normally. We don't exit here — we let the sync flow complete.
               if (!interrupted) {
                 interrupted = true;
                 abortController.abort();
@@ -665,16 +788,7 @@ export function buildCli() {
               }
             },
           );
-          // Parse --cookies <ct0> [auth_token] — variadic, gives us an array
-          let csrfToken: string | undefined;
-          let cookieHeader: string | undefined;
-          if (options.cookies && Array.isArray(options.cookies) && options.cookies.length > 0) {
-            csrfToken = String(options.cookies[0]);
-            const authToken = options.cookies.length > 1 ? String(options.cookies[1]) : undefined;
-            const parts = [`ct0=${csrfToken}`];
-            if (authToken) parts.push(`auth_token=${authToken}`);
-            cookieHeader = parts.join('; ');
-          }
+          const { csrfToken, cookieHeader } = parseCookieOption(options.cookies);
 
           // Load saved cursor for --continue mode
           let resumeCursor: string | undefined;
@@ -737,6 +851,14 @@ export function buildCli() {
           }
           console.log(`\n  \u2713 ${result.added} new bookmarks synced (${result.totalBookmarks} total)`);
           console.log(`  ${friendlyStopReason(result.stopReason)}`);
+          if (result.stopReason === 'rate limited') {
+            const retryAfter = formatRetryAfter(result.retryAfterSec);
+            if (retryAfter) {
+              console.log(`  Retry after about ${retryAfter}, then resume with: ft sync --continue`);
+            } else {
+              console.log('  Resume with: ft sync --continue');
+            }
+          }
           if (result.bookmarkedAtRepaired > 0) {
             console.log(`  \u2713 ${result.bookmarkedAtRepaired} invalid bookmark dates cleared`);
           }
@@ -801,6 +923,8 @@ export function buildCli() {
               // Continue — main sync already succeeded, folders are bonus
             }
           }
+
+          await postSyncMediaFetch();
 
           const newCount = await rebuildIndex();
           if (options.classify && newCount > 0) {
@@ -1596,23 +1720,19 @@ export function buildCli() {
 
   program
     .command('fetch-media')
-    .description('Download media assets for bookmarks (static images only)')
-    .option('--limit <n>', 'Max bookmarks to process', (v: string) => Number(v), 100)
-    .option('--max-bytes <n>', 'Per-asset byte limit', (v: string) => Number(v), 50 * 1024 * 1024)
+    .description('Download media assets for bookmarks')
+    .option('--limit <n>', 'Max pending bookmarks to process (default: all)', (v: string) => Number(v))
+    .option('--max-bytes <n>', 'Per-asset byte limit (default: 200 MB)', (v: string) => Number(v), DEFAULT_MEDIA_MAX_BYTES)
+    .option('--skip-profile-images', 'Skip downloading author profile images')
     .action(safe(async (options) => {
       if (!requireData()) return;
-      let lastLine = 'starting…';
-      const spinner = createSpinner(() => lastLine);
-      const result = await fetchBookmarkMediaBatch({
-        limit: Number(options.limit) || 100,
-        maxBytes: Number(options.maxBytes) || 50 * 1024 * 1024,
-        onProgress: ({ processed, downloaded, failed, total }) => {
-          lastLine = `${processed}/${total} processed  |  ${downloaded} downloaded  |  ${failed} failed`;
-          spinner.update();
-        },
+      await runMediaFetchWithProgress({
+        limit: typeof options.limit === 'number' && !Number.isNaN(options.limit) ? options.limit : undefined,
+        maxBytes: typeof options.maxBytes === 'number' && !Number.isNaN(options.maxBytes)
+          ? options.maxBytes
+          : DEFAULT_MEDIA_MAX_BYTES,
+        skipProfileImages: Boolean(options.skipProfileImages),
       });
-      spinner.stop();
-      console.log(JSON.stringify(result, null, 2));
     }));
 
   // ── ft md ── Export bookmarks as markdown files ────────────────────────
@@ -1621,19 +1741,27 @@ export function buildCli() {
     .command('md')
     .description('Export bookmarks as individual markdown files')
     .option('--force', 'Re-export all bookmarks (overwrite existing files)')
+    .option('--changed', 'Re-export bookmarks whose source data changed since markdown was written')
     .action(safe(async (options) => {
       if (!requireIndex()) return;
+      if (options.force && options.changed) {
+        console.error('  Error: --force and --changed cannot be used together.');
+        process.exitCode = 1;
+        return;
+      }
       let lastLine = '';
       const spinner = createSpinner(() => lastLine);
       const result = await exportBookmarks({
         force: options.force,
+        changed: options.changed,
         onProgress: (s) => {
           lastLine = s;
           spinner.update();
         },
       });
       spinner.stop();
-      const skippedNote = result.skipped > 0 ? ` (${result.skipped} already existed)` : '';
+      const skippedReason = options.changed ? 'up to date' : 'already existed';
+      const skippedNote = result.skipped > 0 ? ` (${result.skipped} ${skippedReason})` : '';
       console.log(`Exported ${result.exported}/${result.total} bookmarks${skippedNote}`);
       console.log(`  ${result.elapsed}s elapsed`);
       console.log(`\n  Open in your markdown viewer:\n  ${mdDir()}`);
@@ -1643,9 +1771,10 @@ export function buildCli() {
 
   program
     .command('wiki')
-    .description('Compile Karpathy-style markdown wiki from bookmarks')
+    .description('Compile Karpathy-style markdown wiki from bookmarks (requires claude or codex CLI on PATH)')
     .option('--full', 'Recompile all pages (ignore incremental cache)')
     .option('--clean', 'Strip leftover LLM code fences from existing wiki pages (no compile)')
+    .addOption(engineOption())
     .action(safe(async (options) => {
       if (!requireIndex()) return;
 
@@ -1678,13 +1807,20 @@ export function buildCli() {
       try {
         const result = await compileMd({
           full: options.full,
+          engineOverride: options.engine ? String(options.engine) : undefined,
           onProgress: (s) => process.stderr.write(s + '\n'),
         });
         const elapsed = ((Date.now() - start) / 1000).toFixed(1);
         const failed = result.pagesFailed > 0 ? ` failed=${result.pagesFailed}` : '';
-        console.log(`Done (${elapsed}s) — engine=${result.engine} created=${result.pagesCreated} updated=${result.pagesUpdated} skipped=${result.pagesSkipped}${failed} total=${result.totalPages}`);
-        if (result.pagesFailed > 0) {
-          console.log(`\n  ${result.pagesFailed} page(s) failed — re-run ft wiki to retry them.`);
+        if (result.aborted) {
+          console.log(`Aborted (${elapsed}s) — engine=${result.engine} created=${result.pagesCreated} updated=${result.pagesUpdated}${failed}`);
+          console.log(`\n  Too many consecutive failures. Check that \`${result.engine}\` is authenticated and not rate-limited, then rerun \`ft wiki\`.`);
+          process.exitCode = 1;
+        } else {
+          console.log(`Done (${elapsed}s) — engine=${result.engine} created=${result.pagesCreated} updated=${result.pagesUpdated} skipped=${result.pagesSkipped}${failed} total=${result.totalPages}`);
+          if (result.pagesFailed > 0) {
+            console.log(`\n  ${result.pagesFailed} page(s) failed — re-run ft wiki to retry them.`);
+          }
         }
         console.log(`\n  Open in your markdown viewer:\n  ${mdDir()}`);
       } finally {

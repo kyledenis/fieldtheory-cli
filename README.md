@@ -10,12 +10,12 @@ Free and open source. Designed for Mac.
 npm install -g fieldtheory
 ```
 
-Requires Node.js 20+. Chrome recommended for session sync; OAuth available for all platforms.
+Requires Node.js 20+. A Chrome-family browser or Firefox is recommended for session sync; OAuth is available for all platforms.
 
 ## Quick start
 
 ```bash
-# 1. Sync your bookmarks (needs Chrome logged into X)
+# 1. Sync your bookmarks (needs a supported browser logged into X)
 ft sync
 
 # 2. Search them
@@ -27,7 +27,7 @@ ft categories
 ft stats
 ```
 
-On first run, `ft sync` extracts your X session from Chrome and downloads your bookmarks into `~/.ft-bookmarks/`.
+On first run, `ft sync` extracts your X session from your browser and downloads your bookmarks into `~/.ft-bookmarks/`.
 
 ## Commands
 
@@ -35,10 +35,12 @@ On first run, `ft sync` extracts your X session from Chrome and downloads your b
 
 | Command | Description |
 |---------|-------------|
-| `ft sync` | Download and sync bookmarks (no API required) |
+| `ft sync` | Download and sync bookmarks, then fetch any missing media (photos, video posters, capped videos). No API required. |
+| `ft sync --no-media` | Sync bookmarks only; skip the media download pass |
+| `ft sync --skip-profile-images` | Sync bookmarks and post media but skip author profile images |
 | `ft sync --rebuild` | Full re-crawl of all bookmarks |
-| `ft sync --continue` | Resume an interrupted sync from the saved cursor |
-| `ft sync --gaps` | Backfill quoted tweets, expand truncated articles, enrich linked article content |
+| `ft sync --continue` | Resume a paused or interrupted sync from the saved cursor |
+| `ft sync --gaps` | Backfill quoted tweets, expand truncated/X Article text, enrich linked articles, and fill any media gaps |
 | `ft sync --folders` | Also sync X bookmark folder tags (read-only mirror of X state) |
 | `ft sync --folder <name>` | Sync a single folder by name (exact or unambiguous prefix) |
 | `ft sync --classify` | Sync then classify new bookmarks with LLM |
@@ -74,7 +76,8 @@ On first run, `ft sync` extracts your X session from Chrome and downloads your b
 
 | Command | Description |
 |---------|-------------|
-| `ft md` | Export bookmarks as individual markdown files |
+| `ft md` | Export bookmarks as individual markdown files, including enriched article text |
+| `ft md --changed` | Re-export only markdown files whose source bookmark data changed |
 | `ft wiki` | Compile a Karpathy-style interlinked knowledge base |
 | `ft ask <question>` | Ask questions against the knowledge base |
 | `ft ask <question> --save` | Ask and save the answer as a concept page |
@@ -94,8 +97,9 @@ On first run, `ft sync` extracts your X session from Chrome and downloads your b
 | Command | Description |
 |---------|-------------|
 | `ft index` | Rebuild search index from JSONL cache (preserves classifications) |
-| `ft fetch-media` | Download media assets (static images only) |
-| `ft status` | Show sync status and data location |
+| `ft fetch-media` | Backfill/download X media assets for existing bookmarks (default: all pending bookmarks) |
+| `ft fetch-media --skip-profile-images` | Download post media without author profile images |
+| `ft status` | Show sync/classification status and data location |
 | `ft path` | Print data directory path |
 
 ## Agent integration
@@ -125,6 +129,8 @@ Works with Claude Code, Codex, or any agent with shell access.
 # Sync and classify every morning
 0 7 * * * ft sync --classify
 ```
+
+`ft` respects standard proxy environment variables for network requests: `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY`, and `NO_PROXY`.
 
 ## Data
 
@@ -161,11 +167,32 @@ To remove all data: `rm -rf ~/.ft-bookmarks`
 
 Use `ft classify` for LLM-powered classification that catches what regex misses.
 
+## Windows Notes
+
+In PowerShell, use `fieldtheory` or `ft.cmd` instead of `ft` because `ft` is already a built-in alias for `Format-Table`.
+
+If browser session sync cannot find the right profile, pass the browser and profile explicitly:
+
+```powershell
+fieldtheory sync --browser chrome --chrome-profile-directory "Default"
+fieldtheory sync --browser edge --chrome-profile-directory "Default"
+```
+
+For Firefox, if profile detection misses the profile, pass the profile directory explicitly with `--firefox-profile-dir`.
+
+If cookie extraction still fails, close the browser completely and retry. As a last resort, pass cookies manually:
+
+```powershell
+fieldtheory sync --cookies <ct0> <auth_token>
+```
+
+Treat `ct0` and `auth_token` like passwords. Do not paste them into logs, issues, or chat.
+
 ## Platform support
 
 | Feature | macOS | Linux | Windows |
 |---------|-------|-------|---------|
-| Session sync (`ft sync`) | Chrome, Chromium, Brave, Helium, Comet, Firefox | Chrome, Chromium, Brave, Firefox | Chrome, Chromium, Brave, Firefox |
+| Session sync (`ft sync`) | Chrome, Chromium, Brave, Edge, Helium, Comet, Dia, Firefox | Chrome, Chromium, Brave, Edge, Firefox | Chrome, Chromium, Brave, Edge, Firefox |
 | OAuth API sync (`ft sync --api`) | Yes | Yes | Yes |
 | Search, list, classify, viz, wiki | Yes | Yes | Yes |
 
