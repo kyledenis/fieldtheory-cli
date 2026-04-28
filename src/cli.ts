@@ -1026,11 +1026,15 @@ export function buildCli() {
       if (options.regex) return;
 
       const engine = await resolveEngine({ override: options.engine ? String(options.engine) : undefined });
-      const model = (options.model as string | undefined) ?? 'sonnet';
+      // Don't hardcode a default model — let the engine decide. Each engine
+      // has its own default (claude → sonnet, ollama → auto-detected local model).
+      // Hardcoding 'sonnet' broke ollama by sending a non-existent model name.
+      const model = options.model as string | undefined;
+      const modelLabel = model ?? getEngineModelInfo(engine.name) ?? engine.name;
 
       try {
         let catStart = Date.now();
-        process.stderr.write(`\nClassifying categories with LLM (${model}) (batches of 50)...\n`);
+        process.stderr.write(`\nClassifying categories with LLM (${modelLabel}) (batches of 50)...\n`);
         const catResult = await classifyWithLlm({
           engine,
           model,
@@ -1081,9 +1085,10 @@ export function buildCli() {
     .action(safe(async (options) => {
       if (!requireData()) return;
       const engine = await resolveEngine({ override: options.engine ? String(options.engine) : undefined });
-      const model = (options.model as string | undefined) ?? 'sonnet';
+      const model = options.model as string | undefined;
+      const modelLabel = model ?? getEngineModelInfo(engine.name) ?? engine.name;
       const start = Date.now();
-      process.stderr.write(`Classifying bookmark domains with LLM (${model}) (batches of 50)...\n`);
+      process.stderr.write(`Classifying bookmark domains with LLM (${modelLabel}) (batches of 50)...\n`);
       const result = await classifyDomainsWithLlm({
         engine,
         model,
