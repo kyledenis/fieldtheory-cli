@@ -1104,66 +1104,253 @@ export function buildCli() {
 
   // ── model ───────────────────────────────────────────────────────────────
 
-  program
+  const modelCmd = program
     .command('model')
-    .description('View or change the default LLM engine for classification')
-    .argument('[engine]', 'Set default engine directly (e.g. claude, codex)')
+    .description('View or configure the LLM engine')
+    .argument('[engine]', 'Quick-set CLI engine (e.g. claude, codex, ollama)')
     .action(safe(async (engineArg?: string) => {
-      const available = detectAvailableEngines();
       const prefs = loadPreferences();
 
-      if (available.length === 0) {
-        console.log('  No LLM engines found on PATH.');
-        console.log('  Install one of:');
-        console.log('    - Claude Code: https://docs.anthropic.com/en/docs/claude-code');
-        console.log('    - Codex CLI:   https://github.com/openai/codex');
-        return;
-      }
-
-      // Direct set: ft model claude
+      // Quick-set: ft model claude
       if (engineArg) {
+        const available = detectAvailableEngines();
         if (!available.includes(engineArg)) {
-          console.log(`  "${engineArg}" is not available. Found: ${available.join(', ')}`);
+          console.log(`  "${engineArg}" is not available on PATH. Found: ${available.join(', ') || 'none'}`);
           process.exitCode = 1;
           return;
         }
-        savePreferences({ ...prefs, defaultEngine: engineArg });
-        console.log(`  \u2713 Default model set to ${engineArg}`);
+        savePreferences({ ...prefs, defaultEngine: engineArg, engine: { mode: 'cli', cliEngine: engineArg } });
+        console.log(`  \u2713 Engine set to CLI: ${engineArg}`);
         return;
       }
 
-      // Interactive picker
-      console.log('  Available engines:\n');
-      for (const name of available) {
-        const marker = name === prefs.defaultEngine ? ' (default)' : '';
-        const model = getEngineModelInfo(name);
-        const modelInfo = model ? ` → ${model}` : '';
-        console.log(`    ${name}${marker}${modelInfo}`);
+      // Status display: ft model
+      const ec = prefs.engine;
+      if (!ec) {
+        // Legacy or unconfigured
+        if (prefs.defaultEngine) {
+          console.log(`  Engine: cli (${prefs.defaultEngine}) — legacy config`);
+          const model = getEngineModelInfo(prefs.defaultEngine);
+          if (model) console.log(`  Model:  ${model}`);
+        } else {
+          console.log('  No LLM engine configured.');
+        }
+        console.log('\n  Run: ft model setup');
+        return;
       }
+
+      if (ec.mode === 'local') {
+        const url = ec.localBaseUrl ?? 'http://localhost:1234';
+        console.log(`  Engine: local server${ec.localServer ? ` (${ec.localServer})` : ''}`);
+        console.log(`  Server: ${url}`);
+        console.log(`  Model:  ${ec.localModel ?? '(auto)'}`);
+        // Health check
+        const { checkServerHealth, listServerModels } = await import('./engine-http.js');
+        const healthy = await checkServerHealth(url);
+        if (healthy) {
+          const models = await listServerModels(url);
+          const loaded = models.length > 0 ? models.join(', ') : 'none loaded';
+          console.log(`  Status: \u25cf running (${loaded})`);
+        } else {
+          console.log(`  Status: \u25cb offline — start your server`);
+        }
+      } else if (ec.mode === 'api') {
+        console.log(`  Engine: API (${ec.apiProvider ?? 'anthropic'})`);
+        console.log(`  Model:  ${ec.apiModel ?? '(not set)'}`);
+        console.log(`  Key:    ${ec.apiKeyFile ?? '(not set)'}`);
+        if (ec.apiKeyFile) {
+          try {
+            const { loadApiKey } = await import('./engine-api.js');
+            loadApiKey(ec.apiKeyFile);
+            console.log(`  Status: \u25cf key file readable`);
+          } catch (err: any) {
+            console.log(`  Status: \u25cb ${err.message}`);
+          }
+        }
+      } else {
+        const eng = ec.cliEngine ?? prefs.defaultEngine ?? '(auto)';
+        console.log(`  Engine: CLI (${eng})`);
+        const model = ec.cliModel ?? getEngineModelInfo(eng);
+        if (model) console.log(`  Model:  ${model}`);
+        const available = detectAvailableEngines();
+        const onPath = available.includes(ec.cliEngine ?? prefs.defaultEngine ?? '');
+        console.log(`  Status: ${onPath ? '\u25cf on PATH' : '\u25cb not found on PATH'}`);
+      }
+
+      console.log('\n  Change: ft model setup');
+    }));
+
+  // ── ft model setup ──────────────────────────────────────────────────
+
+  modelCmd
+    .command('setup')
+    .description('Guided LLM engine configuration')
+    .action(safe(async () => {
+      const prefs = loadPreferences();
+
+      const ask = async (question: string): Promise<string> => {
+        const result = await promptText(question);
+        if (result.kind === 'interrupt') throw new PromptCancelledError('Setup cancelled.', 130);
+        if (result.kind === 'close') throw new PromptCancelledError('Setup cancelled.', 0);
+        return result.value.trim();
+      };
+
+      // ── Step 1: Mode ──
+      console.log('\n  How do you want to run LLM tasks?\n');
+      console.log('    1. Local server   (free, private — LM Studio, Ollama, vLLM, etc.)');
+      console.log('    2. CLI tool        (Claude Code or Codex — uses your subscription)');
+      console.log('    3. API key         (direct Anthropic/OpenAI API — pay per token)');
       console.log();
 
-      if (!process.stdin.isTTY) {
-        if (prefs.defaultEngine) console.log(`  Current default: ${prefs.defaultEngine}`);
-        console.log('  Set with: ft model <engine>');
+      const modeChoice = await ask('  Choose [1/2/3]: ');
+      const mode = modeChoice === '1' ? 'local' : modeChoice === '3' ? 'api' : 'cli';
+
+      // ── Local mode ──
+      if (mode === 'local') {
+        console.log('\n  What server software are you using?\n');
+        console.log('    1. LM Studio       (default: localhost:1234)');
+        console.log('    2. Ollama API      (default: localhost:11434)');
+        console.log('    3. Other           (enter custom URL)');
+        console.log();
+
+        const serverChoice = await ask('  Choose [1/2/3]: ');
+        let localServer: string;
+        let defaultUrl: string;
+
+        if (serverChoice === '2') {
+          localServer = 'ollama';
+          defaultUrl = 'http://localhost:11434';
+        } else if (serverChoice === '3') {
+          localServer = 'other';
+          defaultUrl = 'http://localhost:8000';
+        } else {
+          localServer = 'lmstudio';
+          defaultUrl = 'http://localhost:1234';
+        }
+
+        const urlAnswer = await ask(`  Server URL [${defaultUrl}]: `);
+        const localBaseUrl = urlAnswer || defaultUrl;
+
+        // Health check
+        process.stderr.write('  Checking server... ');
+        const { checkServerHealth, listServerModels } = await import('./engine-http.js');
+        const healthy = await checkServerHealth(localBaseUrl);
+        if (!healthy) {
+          console.log('\u2717 not reachable');
+          console.log(`\n  Could not connect to ${localBaseUrl}`);
+          console.log('  Make sure your server is running and try again.\n');
+          const proceed = await ask('  Save config anyway? [y/N]: ');
+          if (!proceed.toLowerCase().startsWith('y')) return;
+          // Save with no model — they can fix later
+          savePreferences({ ...prefs, engine: { mode: 'local', localServer, localBaseUrl } });
+          console.log('\n  \u2713 Saved (server offline). Start your server, then re-run: ft model setup');
+          return;
+        }
+        console.log('\u2713 connected');
+
+        // List models
+        const models = await listServerModels(localBaseUrl);
+        let localModel: string;
+        if (models.length === 0) {
+          console.log('\n  No models loaded on the server.');
+          const customModel = await ask('  Enter model name (or leave blank): ');
+          localModel = customModel || 'default';
+        } else if (models.length === 1) {
+          localModel = models[0];
+          console.log(`\n  Model: ${localModel}`);
+        } else {
+          console.log('\n  Available models:\n');
+          models.forEach((m, i) => console.log(`    ${i + 1}. ${m}`));
+          console.log();
+          const modelChoice = await ask(`  Choose [1-${models.length}]: `);
+          const idx = parseInt(modelChoice, 10) - 1;
+          localModel = models[idx] ?? models[0];
+        }
+
+        savePreferences({
+          ...prefs,
+          engine: { mode: 'local', localServer, localBaseUrl, localModel },
+        });
+        console.log(`\n  \u2713 Saved. Using local server (${localServer}) with ${localModel}`);
+        console.log('  Change anytime: ft model setup\n');
         return;
       }
 
-      const answer = await promptText('  Select default: ');
-      if (answer.kind === 'interrupt') {
-        throw new PromptCancelledError('Cancelled. No default model saved.', 130);
-      }
-      if (answer.kind === 'close' || !answer.value) {
-        console.log('  No default model saved.');
+      // ── CLI mode ──
+      if (mode === 'cli') {
+        const available = detectAvailableEngines();
+        if (available.length === 0) {
+          console.log('\n  No CLI engines found on PATH.');
+          console.log('  Install one of:');
+          console.log('    - Claude Code: https://docs.anthropic.com/en/docs/claude-code');
+          console.log('    - Codex CLI:   https://github.com/openai/codex');
+          console.log('    - Ollama:      https://ollama.ai');
+          return;
+        }
+
+        console.log('\n  Available CLI engines:\n');
+        available.forEach((name, i) => {
+          const model = getEngineModelInfo(name);
+          console.log(`    ${i + 1}. ${name}${model ? ` (default model: ${model})` : ''}`);
+        });
+        console.log();
+
+        const engineChoice = await ask(`  Choose [1-${available.length}]: `);
+        const idx = parseInt(engineChoice, 10) - 1;
+        const cliEngine = available[idx] ?? available[0];
+
+        const defaultModel = getEngineModelInfo(cliEngine);
+        const modelAnswer = await ask(`  Model${defaultModel ? ` [${defaultModel}]` : ''}: `);
+        const cliModel = modelAnswer || defaultModel || undefined;
+
+        savePreferences({
+          ...prefs,
+          defaultEngine: cliEngine,
+          engine: { mode: 'cli', cliEngine, cliModel },
+        });
+        console.log(`\n  \u2713 Saved. Using CLI: ${cliEngine}${cliModel ? ` (${cliModel})` : ''}`);
+        console.log('  Change anytime: ft model setup\n');
         return;
       }
 
-      if (available.includes(answer.value)) {
-        savePreferences({ ...prefs, defaultEngine: answer.value });
-        console.log(`  \u2713 Default model set to ${answer.value}`);
-      } else {
-        console.log(`  "${answer.value}" is not available. Found: ${available.join(', ')}`);
-        process.exitCode = 1;
+      // ── API mode ──
+      console.log('\n  API provider:\n');
+      console.log('    1. Anthropic   (Claude models)');
+      console.log('    2. OpenAI      (GPT models)');
+      console.log();
+
+      const providerChoice = await ask('  Choose [1/2]: ');
+      const apiProvider = providerChoice === '2' ? 'openai' : 'anthropic';
+
+      const defaultApiModel = apiProvider === 'anthropic' ? 'claude-sonnet-4-6' : 'gpt-4o';
+      const apiModelAnswer = await ask(`  Model [${defaultApiModel}]: `);
+      const apiModel = apiModelAnswer || defaultApiModel;
+
+      console.log(`\n  Enter the path to a file containing your API key.`);
+      console.log(`  (The key itself is NOT stored in preferences — only the file path.)\n`);
+      const defaultKeyPath = apiProvider === 'anthropic'
+        ? `${process.env.HOME}/.config/anthropic/api_key`
+        : `${process.env.HOME}/.config/openai/api_key`;
+      const keyAnswer = await ask(`  Key file [${defaultKeyPath}]: `);
+      const apiKeyFile = keyAnswer || defaultKeyPath;
+
+      // Verify key file
+      try {
+        const { loadApiKey } = await import('./engine-api.js');
+        loadApiKey(apiKeyFile);
+        console.log('  \u2713 Key file readable');
+      } catch (err: any) {
+        console.log(`  \u26a0 ${err.message}`);
+        const proceed = await ask('  Save config anyway? [y/N]: ');
+        if (!proceed.toLowerCase().startsWith('y')) return;
       }
+
+      savePreferences({
+        ...prefs,
+        engine: { mode: 'api', apiProvider, apiModel, apiKeyFile },
+      });
+      console.log(`\n  \u2713 Saved. Using ${apiProvider} API with ${apiModel}`);
+      console.log('  Change anytime: ft model setup\n');
     }));
 
   // ── categories ──────────────────────────────────────────────────────────
