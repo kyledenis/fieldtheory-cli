@@ -245,18 +245,21 @@ export async function resolveEngine(options: { override?: string } = {}): Promis
 export interface InvokeOptions {
   timeout?: number;
   maxBuffer?: number;
-  /** Model override — passed as --model <name> to the engine CLI. */
+  /** Model override for this invocation. */
   model?: string;
 }
 
 function buildArgs(engine: ResolvedEngine, prompt: string, model?: string): string[] {
-  // Each engine handles model placement in its own args() function.
-  // Priority: explicit override → auto-detected → hardcoded default.
   const effectiveModel = model ?? engine.config.detectModel?.() ?? engine.config.defaultModel;
   return engine.config.args(prompt, effectiveModel);
 }
 
 export function invokeEngine(engine: ResolvedEngine, prompt: string, opts: InvokeOptions = {}): string {
+  // Sync variant — only supports CLI mode. Local/API are async-only.
+  const prefs = loadPreferences();
+  if (prefs.engine?.mode && prefs.engine.mode !== 'cli') {
+    throw new Error('Sync invocation only supports CLI engines. Use invokeEngineAsync instead.');
+  }
   const { bin } = engine.config;
   return execFileSync(bin, buildArgs(engine, prompt, opts.model), {
     encoding: 'utf-8',
@@ -267,10 +270,39 @@ export function invokeEngine(engine: ResolvedEngine, prompt: string, opts: Invok
 }
 
 /**
- * Async variant — does not block the event loop, so spinners and
- * setInterval callbacks continue to fire while the LLM runs.
+ * Async invocation — dispatches to the correct backend based on saved
+ * engine config. Supports all three modes: local (HTTP), CLI (execFile),
+ * and API (direct Anthropic/OpenAI).
  */
-export function invokeEngineAsync(engine: ResolvedEngine, prompt: string, opts: InvokeOptions = {}): Promise<string> {
+export async function invokeEngineAsync(engine: ResolvedEngine, prompt: string, opts: InvokeOptions = {}): Promise<string> {
+  const prefs = loadPreferences();
+  const ec = prefs.engine;
+
+  // ── Local (HTTP) mode ──
+  if (ec?.mode === 'local') {
+    const { invokeHttpEngine } = await import('./engine-http.js');
+    const model = opts.model ?? ec.localModel;
+    if (!model) {
+      throw new Error(
+        'No model configured for local server.\n' +
+        'Run: ft model setup'
+      );
+    }
+    return invokeHttpEngine(prompt, model, ec.localBaseUrl ?? 'http://localhost:1234', opts.timeout ?? 300_000);
+  }
+
+  // ── API mode ──
+  if (ec?.mode === 'api') {
+    const { invokeApiEngine, loadApiKey } = await import('./engine-api.js');
+    const model = opts.model ?? ec.apiModel;
+    const provider = (ec.apiProvider as 'anthropic' | 'openai') ?? 'anthropic';
+    if (!model) throw new Error('No API model configured. Run: ft model setup');
+    if (!ec.apiKeyFile) throw new Error('No API key file configured. Run: ft model setup');
+    const apiKey = loadApiKey(ec.apiKeyFile);
+    return invokeApiEngine(prompt, model, provider, apiKey, opts.timeout ?? 120_000);
+  }
+
+  // ── CLI mode (default — also handles legacy configs without engine.mode) ──
   const { bin } = engine.config;
   return new Promise((resolve, reject) => {
     execFile(bin, buildArgs(engine, prompt, opts.model), {
