@@ -76,8 +76,12 @@ function createSpinner(
       onInterrupt();
       return;
     }
-    console.log('\n  Interrupted. Your data is safe \u2014 progress has been saved.');
-    console.log('  Run the same command again to pick up where you left off.\n');
+    console.log('');
+    console.log('  Interrupted. Your data is safe \u2014 progress has been saved.');
+    console.log('  Run the same command again to pick up where you left off.');
+    if (loadPreferences().engine?.mode === 'local') {
+      console.log('  Model is still loaded \u2014 run ft model unload to free memory.');
+    }
     process.exit(0);
   };
   process.once('SIGINT', onSigint);
@@ -1067,7 +1071,11 @@ export function buildCli() {
         const msg = (err as Error).message ?? '';
         if (msg.includes('SIGTERM') || msg.includes('SIGINT') || msg.includes('killed') || msg.includes('signal')) {
           console.log(`\n  Interrupted. Progress saved — completed batches are kept.`);
-          console.log(`  Run ft classify again to continue from where you left off.\n`);
+          console.log(`  Run ft classify again to continue from where you left off.`);
+          if (loadPreferences().engine?.mode === 'local') {
+            console.log(`  Model is still loaded — run ft model unload to free memory.`);
+          }
+          console.log();
           return;
         }
         throw err;
@@ -1141,43 +1149,85 @@ export function buildCli() {
 
       if (ec.mode === 'local') {
         const url = ec.localBaseUrl ?? 'http://localhost:1234';
-        console.log(`  Engine: local server${ec.localServer ? ` (${ec.localServer})` : ''}`);
-        console.log(`  Server: ${url}`);
-        console.log(`  Model:  ${ec.localModel ?? '(auto)'}`);
-        // Health check
+        console.log(`  Engine:  ${ec.localServer ?? 'local'} (${url})`);
         const { checkServerHealth, listServerModels } = await import('./engine-http.js');
         const healthy = await checkServerHealth(url);
-        if (healthy) {
-          const models = await listServerModels(url);
-          const loaded = models.length > 0 ? models.join(', ') : 'none loaded';
-          console.log(`  Status: \u25cf running (${loaded})`);
+        if (!healthy) {
+          console.log(`  Model:   ${ec.localModel ?? '(not set)'}`);
+          console.log(`  Server:  \u2717 offline`);
         } else {
-          console.log(`  Status: \u25cb offline — start your server`);
+          const models = await listServerModels(url);
+          const loadedNames = models.filter(m => m.loaded).map(m => m.id);
+          const configured = ec.localModel;
+          if (configured && loadedNames.includes(configured)) {
+            console.log(`  Model:   ${configured} \u2713`);
+          } else if (configured) {
+            console.log(`  Model:   ${configured} \u2717`);
+            if (loadedNames.length > 0) {
+              console.log(`  Ready:   ${loadedNames.join(', ')}`);
+              console.log(`\n  Configured model isn't loaded. Run ft model setup to switch.`);
+            } else {
+              console.log(`\n  No models loaded. Load one in your server.`);
+            }
+          } else {
+            console.log(`  Model:   (not set)`);
+          }
         }
       } else if (ec.mode === 'api') {
-        console.log(`  Engine: API (${ec.apiProvider ?? 'anthropic'})`);
-        console.log(`  Model:  ${ec.apiModel ?? '(not set)'}`);
-        console.log(`  Key:    ${ec.apiKeyFile ?? '(not set)'}`);
+        console.log(`  Engine:  ${ec.apiProvider ?? 'anthropic'} API`);
+        console.log(`  Model:   ${ec.apiModel ?? '(not set)'}`);
         if (ec.apiKeyFile) {
           try {
             const { loadApiKey } = await import('./engine-api.js');
             loadApiKey(ec.apiKeyFile);
-            console.log(`  Status: \u25cf key file readable`);
+            console.log(`  Key:     ${ec.apiKeyFile} \u2713`);
           } catch (err: any) {
-            console.log(`  Status: \u25cb ${err.message}`);
+            console.log(`  Key:     ${ec.apiKeyFile} \u2717 ${err.message}`);
           }
         }
       } else {
         const eng = ec.cliEngine ?? prefs.defaultEngine ?? '(auto)';
-        console.log(`  Engine: CLI (${eng})`);
-        const model = ec.cliModel ?? getEngineModelInfo(eng);
-        if (model) console.log(`  Model:  ${model}`);
         const available = detectAvailableEngines();
         const onPath = available.includes(ec.cliEngine ?? prefs.defaultEngine ?? '');
-        console.log(`  Status: ${onPath ? '\u25cf on PATH' : '\u25cb not found on PATH'}`);
+        console.log(`  Engine:  ${eng}${onPath ? '' : ' \u2717 not on PATH'}`);
+        const model = ec.cliModel ?? getEngineModelInfo(eng);
+        if (model) console.log(`  Model:   ${model}`);
       }
 
-      console.log('\n  Change: ft model setup');
+      console.log('\n  Change:  ft model setup');
+    }));
+
+  // ── ft model unload ─────────────────────────────────────────────────
+
+  modelCmd
+    .command('unload')
+    .description('Unload the current model from server memory')
+    .action(safe(async () => {
+      const prefs = loadPreferences();
+      const ec = prefs.engine;
+      if (ec?.mode !== 'local') {
+        console.log('  Unload is only relevant for local server mode.');
+        return;
+      }
+      const url = ec.localBaseUrl ?? 'http://localhost:1234';
+      const { checkServerHealth, listServerModels, unloadModel } = await import('./engine-http.js');
+      const healthy = await checkServerHealth(url);
+      if (!healthy) {
+        console.log('  Server is not running.');
+        return;
+      }
+      const models = await listServerModels(url);
+      const loaded = models.filter(m => m.loaded);
+      if (loaded.length === 0) {
+        console.log('  No models currently loaded.');
+        return;
+      }
+      for (const m of loaded) {
+        process.stderr.write(`  Unloading ${m.id}... `);
+        const ok = await unloadModel(url, m.id);
+        console.log(ok ? '\u2713' : '\u2717');
+      }
+      console.log('  Memory freed.');
     }));
 
   // ── ft model setup ──────────────────────────────────────────────────
@@ -1197,9 +1247,9 @@ export function buildCli() {
 
       // ── Step 1: Mode ──
       console.log('\n  How do you want to run LLM tasks?\n');
-      console.log('    1. Local server   (free, private — LM Studio, Ollama, vLLM, etc.)');
-      console.log('    2. CLI tool        (Claude Code or Codex — uses your subscription)');
-      console.log('    3. API key         (direct Anthropic/OpenAI API — pay per token)');
+      console.log('    1. Local server  (free, private — LM Studio, Ollama, vLLM, etc.)');
+      console.log('    2. CLI tool      (Claude Code or Codex — uses your subscription)');
+      console.log('    3. API key       (direct Anthropic/OpenAI API — pay per token)');
       console.log();
 
       const modeChoice = await ask('  Choose [1/2/3]: ');
@@ -1207,10 +1257,10 @@ export function buildCli() {
 
       // ── Local mode ──
       if (mode === 'local') {
-        console.log('\n  What server software are you using?\n');
-        console.log('    1. LM Studio       (default: localhost:1234)');
-        console.log('    2. Ollama API      (default: localhost:11434)');
-        console.log('    3. Other           (enter custom URL)');
+        console.log('\n  What server are you using?\n');
+        console.log('    1. LM Studio  (default: localhost:1234)');
+        console.log('    2. Ollama     (default: localhost:11434)');
+        console.log('    3. Other      (enter custom URL)');
         console.log();
 
         const serverChoice = await ask('  Choose [1/2/3]: ');
@@ -1233,7 +1283,7 @@ export function buildCli() {
 
         // Health check
         process.stderr.write('  Checking server... ');
-        const { checkServerHealth, listServerModels } = await import('./engine-http.js');
+        const { checkServerHealth, listServerModels, invokeHttpEngine } = await import('./engine-http.js');
         const healthy = await checkServerHealth(localBaseUrl);
         if (!healthy) {
           console.log('\u2717 not reachable');
@@ -1241,30 +1291,90 @@ export function buildCli() {
           console.log('  Make sure your server is running and try again.\n');
           const proceed = await ask('  Save config anyway? [y/N]: ');
           if (!proceed.toLowerCase().startsWith('y')) return;
-          // Save with no model — they can fix later
           savePreferences({ ...prefs, engine: { mode: 'local', localServer, localBaseUrl } });
           console.log('\n  \u2713 Saved (server offline). Start your server, then re-run: ft model setup');
           return;
         }
         console.log('\u2713 connected');
 
-        // List models
-        const models = await listServerModels(localBaseUrl);
+        // List models — show loaded first, then available
+        const allModels = await listServerModels(localBaseUrl);
+        const loadedModels = allModels.filter(m => m.loaded);
+        const unloadedModels = allModels.filter(m => !m.loaded);
         let localModel: string;
-        if (models.length === 0) {
-          console.log('\n  No models loaded on the server.');
+
+        if (allModels.length === 0) {
+          console.log('\n  No models found on the server.');
           const customModel = await ask('  Enter model name (or leave blank): ');
           localModel = customModel || 'default';
-        } else if (models.length === 1) {
-          localModel = models[0];
-          console.log(`\n  Model: ${localModel}`);
         } else {
-          console.log('\n  Available models:\n');
-          models.forEach((m, i) => console.log(`    ${i + 1}. ${m}`));
+          // Build ordered list: loaded first, then unloaded
+          const ordered = [...loadedModels, ...unloadedModels];
+          console.log('\n  Models:\n');
+          let idx = 1;
+          if (loadedModels.length > 0) {
+            for (const m of loadedModels) {
+              console.log(`    ${idx}. ${m.id}  \u2713 ready`);
+              idx++;
+            }
+          }
+          if (unloadedModels.length > 0) {
+            if (loadedModels.length > 0) console.log();
+            for (const m of unloadedModels) {
+              console.log(`    ${idx}. ${m.id}`);
+              idx++;
+            }
+          }
           console.log();
-          const modelChoice = await ask(`  Choose [1-${models.length}]: `);
-          const idx = parseInt(modelChoice, 10) - 1;
-          localModel = models[idx] ?? models[0];
+
+          if (ordered.length === 1) {
+            localModel = ordered[0].id;
+          } else {
+            const defaultChoice = loadedModels.length > 0 ? '1' : '';
+            const modelChoice = await ask(`  Choose [1-${ordered.length}]${defaultChoice ? ` [${defaultChoice}]` : ''}: `);
+            const choiceIdx = parseInt(modelChoice || defaultChoice, 10) - 1;
+            localModel = ordered[choiceIdx]?.id ?? ordered[0].id;
+          }
+        }
+
+        // If the selected model isn't loaded, offer to swap
+        const selectedIsLoaded = loadedModels.some(m => m.id === localModel);
+        if (!selectedIsLoaded && loadedModels.length > 0) {
+          const { unloadModel, loadModel } = await import('./engine-http.js');
+          const currentlyLoaded = loadedModels.map(m => m.id).join(', ');
+          console.log(`\n  ${localModel} is not loaded. Currently loaded: ${currentlyLoaded}`);
+          const swap = await ask('  Unload current and load this model? [Y/n]: ');
+          if (swap.toLowerCase() === 'n') {
+            console.log('  Skipping — keeping current model.');
+          } else {
+            for (const m of loadedModels) {
+              process.stderr.write(`  Unloading ${m.id}... `);
+              await unloadModel(localBaseUrl, m.id);
+              console.log('\u2713');
+            }
+            process.stderr.write(`  Loading ${localModel}... `);
+            const loadTime = await loadModel(localBaseUrl, localModel);
+            if (loadTime != null) {
+              console.log(`\u2713 (${loadTime.toFixed(1)}s)`);
+            } else {
+              console.log('\u2717 failed');
+              console.log(`\n  Could not load ${localModel}. It may be too large for available memory.`);
+              const proceed = await ask('  Save config anyway? [y/N]: ');
+              if (!proceed.toLowerCase().startsWith('y')) return;
+            }
+          }
+        } else if (!selectedIsLoaded) {
+          const { loadModel } = await import('./engine-http.js');
+          process.stderr.write(`  Loading ${localModel}... `);
+          const loadTime = await loadModel(localBaseUrl, localModel);
+          if (loadTime != null) {
+            console.log(`\u2713 (${loadTime.toFixed(1)}s)`);
+          } else {
+            console.log('\u2717 failed');
+            console.log(`\n  Could not load ${localModel}.`);
+            const proceed = await ask('  Save config anyway? [y/N]: ');
+            if (!proceed.toLowerCase().startsWith('y')) return;
+          }
         }
 
         savePreferences({

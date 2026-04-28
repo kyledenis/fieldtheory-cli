@@ -146,7 +146,7 @@ export async function askMd(question: string, options: AskOptions = {}): Promise
   // ── LLM call ────────────────────────────────────────────────────────────
   progress('Invoking LLM...');
   const prompt     = buildAskPrompt(question, mdContext, rawBookmarks);
-  const rawAnswer  = await invokeEngineAsync(engine, prompt, { timeout: 180_000, maxBuffer: 1024 * 1024 * 4 });
+  const rawAnswer  = await invokeEngineAsync(engine, prompt, { timeout: 180_000, maxBuffer: 1024 * 1024 * 4, temperature: 0.3, maxTokens: 8192 });
   const wikiUpdates = extractWikiUpdates(rawAnswer);
   const answer      = stripWikiUpdatesSection(rawAnswer);
 

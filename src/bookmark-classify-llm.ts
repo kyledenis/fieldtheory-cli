@@ -141,6 +141,15 @@ export async function classifyWithLlm(
     let failed = 0;
     let batchCount = 0;
 
+    // Warm up local model before batch processing
+    const { loadPreferences } = await import('./preferences.js');
+    const prefs = loadPreferences();
+    if (prefs.engine?.mode === 'local' && prefs.engine.localModel) {
+      const { warmUpModel } = await import('./engine-http.js');
+      process.stderr.write('  Warming up model...\n');
+      await warmUpModel(prefs.engine.localBaseUrl ?? 'http://localhost:1234', prefs.engine.localModel);
+    }
+
     // Process in batches
     for (let i = 0; i < unclassified.length; i += BATCH_SIZE) {
       const batch = unclassified.slice(i, i + BATCH_SIZE);
@@ -151,7 +160,7 @@ export async function classifyWithLlm(
 
       try {
         const prompt = buildPrompt(batch);
-        const raw = await invokeEngineAsync(engine, prompt, { model: options.model });
+        const raw = await invokeEngineAsync(engine, prompt, { model: options.model, temperature: 0.1, maxTokens: 8192 });
         const results = parseResponse(raw, batchIds);
 
         // Update SQLite
@@ -268,7 +277,7 @@ export async function classifyDomainsWithLlm(
 
       try {
         const prompt = buildDomainPrompt(batch);
-        const raw = await invokeEngineAsync(engine, prompt, { model: options.model });
+        const raw = await invokeEngineAsync(engine, prompt, { model: options.model, temperature: 0.1, maxTokens: 8192 });
         // Reuse the same parse logic — structure is identical
         const results = parseResponse(raw, batchIds);
 

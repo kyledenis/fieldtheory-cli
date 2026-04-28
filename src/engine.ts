@@ -257,6 +257,10 @@ export interface InvokeOptions {
   maxBuffer?: number;
   /** Model override for this invocation. */
   model?: string;
+  /** Temperature for HTTP/API backends (ignored for CLI). */
+  temperature?: number;
+  /** Max tokens for HTTP/API backends (ignored for CLI). */
+  maxTokens?: number;
 }
 
 function buildArgs(engine: ResolvedEngine, prompt: string, model?: string): string[] {
@@ -297,7 +301,10 @@ export async function invokeEngineAsync(engine: ResolvedEngine, prompt: string, 
         'Run: ft model setup'
       );
     }
-    return invokeHttpEngine(prompt, model, ec.localBaseUrl ?? 'http://localhost:1234', opts.timeout ?? 300_000);
+    return invokeHttpEngine(prompt, model, ec.localBaseUrl ?? 'http://localhost:1234', opts.timeout ?? 300_000, {
+      temperature: opts.temperature,
+      max_tokens: opts.maxTokens,
+    });
   }
 
   // ── API mode ──

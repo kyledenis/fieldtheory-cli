@@ -15,6 +15,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ensureDir, pathExists, readJson, writeMd, appendLine, writeJson, listFiles, readMd } from './fs.js';
+import { loadPreferences } from './preferences.js';
 import {
   mdDir, mdIndexPath, mdLogPath, mdStatePath, mdSchemaPath,
   mdCategoriesDir, mdDomainsDir, mdEntitiesDir, mdConceptsDir,
@@ -35,11 +36,12 @@ const MIN_DOMAIN_COUNT   = 2;
 const MIN_ENTITY_COUNT   = 3;
 const MAX_SAMPLE_SIZE    = 50;
 
-/** Scale timeout by sample count — large categories need more time. */
+/** Scale timeout by sample count — local models need much more time than cloud. */
 function llmOpts(sampleCount: number) {
-  // Base 120s + 2s per bookmark sampled, capped at 10 min
-  const timeout = Math.min(120_000 + sampleCount * 2_000, 600_000);
-  return { timeout, maxBuffer: 1024 * 1024 * 4 };
+  // Base 300s + 3s per bookmark sampled, capped at 15 min.
+  // A 35B thinking model at ~15 tok/s needs 3-7 min per page.
+  const timeout = Math.min(300_000 + sampleCount * 3_000, 900_000);
+  return { timeout, maxBuffer: 1024 * 1024 * 4, temperature: 0.4, maxTokens: 16384 };
 }
 
 export interface MdState {
@@ -335,8 +337,17 @@ async function doCompile(
     if (toGenerate.length === 0) {
       progress('Nothing to compile — all pages up to date.');
     } else {
-      const est = toGenerate.length > 3 ? ` (~${toGenerate.length}–${toGenerate.length * 2} min)` : '';
-      progress(`\nGenerating ${toGenerate.length} pages with ${engine.name}${est}`);
+      const estMinLow = toGenerate.length;
+      const estMinHigh = toGenerate.length * 2;
+      const fmtTime = (mins: number) => mins >= 60 ? `${(mins / 60).toFixed(1)}h` : `${mins}m`;
+      const est = toGenerate.length > 3 ? ` (~${fmtTime(estMinLow)}–${fmtTime(estMinHigh)})` : '';
+      const engineLabel = (() => {
+        const ec = loadPreferences().engine;
+        if (ec?.mode === 'local') return `${ec.localServer ?? 'local'} (${ec.localModel ?? 'auto'})`;
+        if (ec?.mode === 'api') return `${ec.apiProvider ?? 'api'} (${ec.apiModel ?? 'auto'})`;
+        return engine.name;
+      })();
+      progress(`\nGenerating ${toGenerate.length} pages with ${engineLabel}${est}`);
       if (skipCount > 0) progress(`  ${skipCount} pages unchanged, skipping`);
       progress(`  Follow live: tail -f ${mdLogPath()}`);
       progress('');
@@ -346,7 +357,22 @@ async function doCompile(
       );
     }
 
+    // ── Warm up local model if needed ──────────────────────────────────
+    if (toGenerate.length > 0) {
+      const prefs = loadPreferences();
+      if (prefs.engine?.mode === 'local' && prefs.engine.localModel) {
+        const { warmUpModel } = await import('./engine-http.js');
+        const url = prefs.engine.localBaseUrl ?? 'http://localhost:1234';
+        progress('Warming up model...');
+        await warmUpModel(url, prefs.engine.localModel);
+      }
+    }
+
     // ── Generate each page ───────────────────────────────────────────────
+    const MAX_CONSECUTIVE_FAILURES = 3;
+    let consecutiveFailures = 0;
+    let lastFailureMsg = '';
+
     for (let i = 0; i < toGenerate.length; i++) {
       const item = toGenerate[i];
       const tag = `[${i + 1}/${toGenerate.length}]`;
@@ -365,17 +391,53 @@ async function doCompile(
       }
 
       const opts = llmOpts(samples.length);
-      await logLine(`${tag} ${item.key} (${samples.length} sampled, ${Math.round(opts.timeout / 1000)}s timeout)...`);
 
-      let content: string;
-      try {
-        const raw = await invokeEngineAsync(engine, prompt, opts);
-        content = stripLlmMarkdownFence(raw);
-      } catch (err) {
-        const msg = (err as Error).message ?? String(err);
-        const isTimeout = msg.includes('ETIMEDOUT') || msg.includes('timed out');
-        await logLine(`${tag} ${item.key} — ${isTimeout ? 'TIMEOUT' : 'ERROR'}: ${msg.slice(0, 120)}`);
+      // Live elapsed timer while waiting for the LLM
+      const genStart = Date.now();
+      const ticker = setInterval(() => {
+        const elapsed = Math.round((Date.now() - genStart) / 1000);
+        const status = elapsed < 10 ? 'generating' : elapsed < 60 ? 'thinking' : 'still thinking';
+        process.stderr.write(`\r\x1b[K${tag} ${item.key} — ${status} (${elapsed}s)`);
+      }, 1_000);
+      process.stderr.write(`${tag} ${item.key} — generating...`);
+
+      let content: string = '';
+      let lastErr: string | undefined;
+
+      // Try up to 2 attempts — handles cold-start failures after model load
+      for (let attempt = 0; attempt < 2; attempt++) {
+        if (attempt > 0) {
+          process.stderr.write(`\r\x1b[K${tag} ${item.key} — retrying...`);
+          await new Promise(r => setTimeout(r, 3_000));
+        }
+        try {
+          const raw = await invokeEngineAsync(engine, prompt, opts);
+          clearInterval(ticker);
+          content = stripLlmMarkdownFence(raw);
+          consecutiveFailures = 0;
+          process.stderr.write(`\r\x1b[K`);
+          lastErr = undefined;
+          break;
+        } catch (err) {
+          lastErr = (err as Error).message ?? String(err);
+        }
+      }
+
+      if (lastErr) {
+        clearInterval(ticker);
+        process.stderr.write(`\r\x1b[K`);
+        const isTimeout = lastErr.includes('ETIMEDOUT') || lastErr.includes('timed out') || lastErr.includes('aborted');
+        await logLine(`${tag} ${item.key} — ${isTimeout ? 'TIMEOUT' : 'ERROR'}: ${lastErr.slice(0, 120)}`);
         pagesFailed++;
+        consecutiveFailures++;
+        lastFailureMsg = lastErr;
+
+        if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+          progress(`\n  Stopped: ${MAX_CONSECUTIVE_FAILURES} consecutive failures.`);
+          progress(`  Last error: ${lastFailureMsg.slice(0, 200)}`);
+          progress(`  Check your engine config: ft model\n`);
+          break;
+        }
         continue;
       }
 
@@ -393,7 +455,8 @@ async function doCompile(
       // Save state after each page so Ctrl-C resumes where we left off
       await writeJson(mdStatePath(), state);
 
-      await logLine(`${tag} ${item.key} → ${outcome}`);
+      const elapsed = Math.round((Date.now() - genStart) / 1000);
+      await logLine(`${tag} ${item.key} → ${outcome} (${elapsed}s)`);
     }
   } finally {
     db.close();
