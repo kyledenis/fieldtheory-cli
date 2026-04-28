@@ -1666,8 +1666,12 @@ export function buildCli() {
 
       const start = Date.now();
       const onSigint = () => {
-        console.log('\n  Interrupted. Your data is safe — progress has been saved.');
-        console.log('  Run the same command again to pick up where you left off.\n');
+        console.log('');
+        console.log('  Interrupted. Your data is safe \u2014 progress has been saved.');
+        console.log('  Run the same command again to pick up where you left off.');
+        if (loadPreferences().engine?.mode === 'local') {
+          console.log('  Model is still loaded \u2014 run ft model unload to free memory.');
+        }
         process.exit(0);
       };
       process.once('SIGINT', onSigint);

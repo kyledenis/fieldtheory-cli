@@ -41,7 +41,7 @@ function llmOpts(sampleCount: number) {
   // Base 300s + 3s per bookmark sampled, capped at 15 min.
   // A 35B thinking model at ~15 tok/s needs 3-7 min per page.
   const timeout = Math.min(300_000 + sampleCount * 3_000, 900_000);
-  return { timeout, maxBuffer: 1024 * 1024 * 4, temperature: 0.4, maxTokens: 16384 };
+  return { timeout, maxBuffer: 1024 * 1024 * 4, temperature: 0.4, maxTokens: 8192 };
 }
 
 export interface MdState {
