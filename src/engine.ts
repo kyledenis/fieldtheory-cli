@@ -92,9 +92,19 @@ const KNOWN_ENGINES: Record<string, EngineConfig> = {
 /** Order used when auto-detecting. Prefer local (free) over cloud. */
 const PREFERENCE_ORDER = ['ollama', 'claude', 'codex'];
 
-/** Get the effective model name for a given engine (detected or default). */
-export function getEngineModelInfo(engineName: string): string | undefined {
-  const cfg = KNOWN_ENGINES[engineName];
+/** Get the effective model name for the current engine config. */
+export function getEngineModelInfo(engineName?: string): string | undefined {
+  // Check structured preferences first (local/API modes)
+  const prefs = loadPreferences();
+  const ec = prefs.engine;
+  if (ec?.mode === 'local') return ec.localModel;
+  if (ec?.mode === 'api') return ec.apiModel;
+  if (ec?.mode === 'cli' && ec.cliModel) return ec.cliModel;
+
+  // Fall back to CLI engine registry
+  const name = engineName ?? ec?.cliEngine ?? prefs.defaultEngine;
+  if (!name) return undefined;
+  const cfg = KNOWN_ENGINES[name];
   if (!cfg) return undefined;
   return cfg.detectModel?.() ?? cfg.defaultModel;
 }
@@ -254,12 +264,11 @@ function buildArgs(engine: ResolvedEngine, prompt: string, model?: string): stri
   return engine.config.args(prompt, effectiveModel);
 }
 
+/**
+ * @deprecated Use invokeEngineAsync instead. Sync invocation only supports
+ * CLI engines and will throw for local/API modes.
+ */
 export function invokeEngine(engine: ResolvedEngine, prompt: string, opts: InvokeOptions = {}): string {
-  // Sync variant — only supports CLI mode. Local/API are async-only.
-  const prefs = loadPreferences();
-  if (prefs.engine?.mode && prefs.engine.mode !== 'cli') {
-    throw new Error('Sync invocation only supports CLI engines. Use invokeEngineAsync instead.');
-  }
   const { bin } = engine.config;
   return execFileSync(bin, buildArgs(engine, prompt, opts.model), {
     encoding: 'utf-8',
